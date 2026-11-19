@@ -1,0 +1,19 @@
+LIBRARY KERNEL32.dll
+EXPORTS
+ GetModuleHandleW
+ FindResourceW
+ LoadResource
+ LockResource
+ SizeofResource
+ GetTempPathW
+ GetTempFileNameW
+ GetSystemDirectoryW
+ DeleteFileW
+ CreateFileW
+ WriteFile
+ CloseHandle
+ SetEnvironmentVariableW
+ CreateProcessW
+ WaitForSingleObject
+ GetExitCodeProcess
+ ExitProcess

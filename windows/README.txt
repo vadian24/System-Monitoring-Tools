@@ -1,0 +1,58 @@
+SYSTEM MONITOR FOR WINDOWS
+
+Windows 10/11 desktop edition
+
+Install
+-------
+1. Extract the entire ZIP to a folder.
+2. Install 64-bit Python 3.12 or later if needed:
+   https://www.python.org/downloads/windows/
+3. Double-click InstallWindowsMonitor.cmd. It downloads Python dependencies
+   from PyPI (internet required), installs the monitor for your account, and
+   opens the dashboard.
+4. To open it again, search Start for System Monitor for Windows.
+
+Administrator rights are not required. The installer adds a background
+collector to your Windows Startup folder. It runs at sign-in and keeps
+recording after you close the dashboard. To install without a sign-in
+collector, run InstallWindowsMonitor.cmd --no-startup from Command Prompt.
+To disable collector startup later, open shell:startup from Windows Run
+and remove System Monitor for Windows Collector.
+
+What the dashboard shows
+------------------------
+- Overview: live CPU, RAM, disk reads and writes, and NVIDIA GPU utilization,
+  temperature, VRAM used and capacity, and power when nvidia-smi is available.
+- Processes: CPU, memory, and total process write I/O where permitted. On
+  Windows this process counter can include non-disk I/O.
+- Services: Windows Service Control Manager entries and running, stopped,
+  and paused states. Service failures are available in Events when logged.
+- Hardware: CPU/core activity, disks, filesystems, network interfaces,
+  motherboard, BIOS, display adapters and USB controllers, where available.
+  General motherboard sensors, fan speeds, and live non-NVIDIA GPU readings
+  are not covered in this edition.
+- Events: recent critical, error and warning entries from the System and
+  Application Event Logs, plus selected sleep and wake events and alerts from
+  the monitor. Search/filter by message or source and export matching CSV.
+- Network Traffic: interface send and receive charts, observed TCP/connected
+  UDP peers, process attribution where available, and a country watchlist.
+  Very short connections may fall between samples. Windows per-peer byte
+  counts are not collected. Network history includes up to seven days.
+
+Country lookup
+--------------
+The KR/KP watchlist can be edited in the Network Traffic tab. Country
+watchlist matches require a GeoLite2 Country database. Download it from
+MaxMind and place the extracted GeoLite2-Country.mmdb file into the folder
+opened by Log folder. The collector loads it automatically. Connections
+remain visible before adding the database and country appears as Unknown.
+The app performs lookups locally. VPNs, hosting and out-of-date databases
+can affect country estimates.
+https://support.maxmind.com/knowledge-base/articles/download-and-update-maxmind-databases
+
+Data
+----
+Local history is stored under %LOCALAPPDATA%\SystemMonitorWindows\History.
+The monitor keeps seven days of telemetry and up to 30 days or 25,000 event
+groups, whichever limit is reached first. Access to processes, devices or
+Event Logs depends on what Windows exposes to the signed-in account.

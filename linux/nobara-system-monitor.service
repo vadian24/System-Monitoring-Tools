@@ -1,0 +1,13 @@
+[Unit]
+Description=Nobara System Monitor collector
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/share/nobara-system-monitor/monitor.py --collect
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=12
+UMask=0077
+
+[Install]
+WantedBy=default.target
