@@ -1,17 +1,17 @@
 # System Monitoring Tools
 
-Local desktop monitors for Windows and Linux. Both versions offer a live dashboard for CPU, memory, storage, NVIDIA GPU metrics where available, running processes, services, system events, and network activity. History is stored on the computer running the monitor.
+Local desktop monitors for Windows and Linux. Both versions offer a live dashboard for CPU, memory, storage, GPU metrics for detected display adapters where supported, running processes, services, system events, and network activity. History is stored on the computer running the monitor.
 
 | Platform | Download | Source and documentation |
 | --- | --- | --- |
 | Windows 10/11, x64 | [SystemMonitorSetup.exe](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/SystemMonitorSetup.exe) | [Windows source](windows/) · [Windows guide](windows/README.txt) |
-| Nobara Linux with KDE Plasma | [Nobara-System-Monitor.zip](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/Nobara-System-Monitor.zip) | [Linux source](linux/) · [Linux guide](linux/README.md) |
+| Linux desktop | [Linux-System-Monitor.zip](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/Linux-System-Monitor.zip) | [Linux source](linux/) · [Linux guide](linux/README.md) |
 
 These links download the files directly. If the GitHub file view shows **Error Loading Page**, use the download links above or the ones in the [downloads folder](downloads/).
 
 ## Demo
 
-This walkthrough shows the Nobara Linux dashboard, including live GPU charts, system events, and network activity.
+This walkthrough shows the Linux dashboard, including live GPU charts, system events, and network activity.
 
 [![Animated preview of the System Monitor walkthrough](docs/demo/system-monitor-preview.gif)](docs/demo/system-monitor-demo.mp4)
 
@@ -27,15 +27,15 @@ The installer is unsigned and may show a Windows SmartScreen warning. The earlie
 
 ## Linux
 
-1. Extract `Nobara-System-Monitor.zip`.
+1. Extract `Linux-System-Monitor.zip`.
 2. Open a terminal in the extracted `Nobara-System-Monitor` folder and run `bash install.sh`.
-3. Open **Nobara System Monitor** from the KDE application menu. The installer creates a user service that records after you close the dashboard. To preview the dashboard from the extracted folder, run `python3 monitor.py`.
+3. Open **Linux System Monitor** from your desktop application menu. The installer creates a user service that records after you close the dashboard. To preview the dashboard from the extracted folder, run `python3 monitor.py`.
 
 The [Linux guide](linux/README.md) lists dependencies and explains the user service.
 
 ## Dashboard updates
 
-Install version 1.1.0 or later once to add the updater. Both dashboards check GitHub shortly after opening and every 30 minutes while open. When **Update Available** appears, click **Update**. The dashboard verifies the download, replaces the per-user application files, restarts the collector as needed, and reopens. Monitoring history and settings stay in the local history folder.
+Install version 1.1.0 or later once to add the updater. Both dashboards check GitHub when they open. Use **Check for updates** in the header to check again. When **Update Available** appears, click **Update**. The dashboard verifies the download, replaces the per-user application files, restarts the collector as needed, and reopens. Monitoring history and settings stay in the local history folder.
 
 If an older Windows dashboard says its running collector does not support automatic restart, close the dashboard and run the current Windows setup once. Future updates can then run from the dashboard.
 
@@ -55,7 +55,7 @@ bash windows/installer/build.sh
 
 The output is `windows/installer/.build/SystemMonitorSetup.exe`. Set `LLVM_BIN` to the LLVM binaries directory if those commands are outside your `PATH`.
 
-For a dashboard update, increase the version in each affected platform's `version.json`. Rebuild its download and publish the ZIP, its SHA-256, and the matching version in `downloads/update-manifest.json` together. For Windows, rebuild the setup executable as well.
+For a dashboard update, increase the version in each affected platform's `version.json`. Rebuild its download and publish the ZIP, its SHA-256, and the matching version in `downloads/update-manifest.json` together. For Windows, rebuild the setup executable as well. Publish the same Linux ZIP under both the public download name and the manifest filename so older dashboards can still update.
 
 [SHA-256 checksums for downloads](downloads/SHA256SUMS)
 

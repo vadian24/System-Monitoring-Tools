@@ -1,5 +1,5 @@
 [Unit]
-Description=Nobara System Monitor collector
+Description=Linux System Monitor collector
 
 [Service]
 Type=simple

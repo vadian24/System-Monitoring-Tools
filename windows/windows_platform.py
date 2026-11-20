@@ -1,4 +1,5 @@
 """Windows inventory, Service Control Manager and Event Log adapters."""
+from collections import Counter
 import ctypes
 from functools import lru_cache
 import json
@@ -7,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from uuid import UUID
 
 import psutil
 
@@ -41,6 +43,21 @@ foreach ($class in @('Win32_ComputerSystem','Win32_BaseBoard','Win32_BIOS','Win3
     }
 }
 ConvertTo-Json -InputObject $inventory -Depth 4 -Compress
+"""
+
+GPU_COUNTERS_SCRIPT = r"""
+$rows = @{}
+foreach ($entry in @(
+        @('engine', 'Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine'),
+        @('memory', 'Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory'))) {
+    try {
+        $rows[$entry[0]] = @(Get-CimInstance -ClassName $entry[1] -OperationTimeoutSec 3 |
+            Select-Object Name, UtilizationPercentage, DedicatedUsage)
+    } catch {
+        $rows[$entry[0]] = @()
+    }
+}
+ConvertTo-Json -InputObject $rows -Depth 3 -Compress
 """
 
 EVENT_SCRIPT = r"""
@@ -188,6 +205,118 @@ def nvidia_tool():
         if candidate.is_file():
             return str(candidate)
     return None
+
+
+class DxgiAdapterDescription(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_wchar * 128),
+        ("vendor", ctypes.c_uint32), ("device", ctypes.c_uint32),
+        ("subsystem", ctypes.c_uint32), ("revision", ctypes.c_uint32),
+        ("dedicated_video", ctypes.c_size_t), ("dedicated_system", ctypes.c_size_t),
+        ("shared_system", ctypes.c_size_t),
+        ("luid_low", ctypes.c_uint32), ("luid_high", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+    ]
+
+
+def dxgi_adapters():
+    def method(pointer, index, result, *arguments):
+        table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        return ctypes.WINFUNCTYPE(result, ctypes.c_void_p, *arguments)(table[index])
+
+    try:
+        create = ctypes.WinDLL("dxgi").CreateDXGIFactory1
+    except (AttributeError, OSError):
+        return []
+    guid = (ctypes.c_uint32 * 4).from_buffer_copy(UUID("770aae78-f26f-4dba-a829-253c83d1b387").bytes_le)
+    factory = ctypes.c_void_p()
+    create.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+    create.restype = ctypes.c_int32
+    if create(ctypes.byref(guid), ctypes.byref(factory)) < 0:
+        return []
+    rows = []
+    try:
+        enumerate_adapter = method(factory, 12, ctypes.c_int32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p))
+        for index in range(64):
+            adapter = ctypes.c_void_p()
+            if enumerate_adapter(factory, index, ctypes.byref(adapter)) < 0:
+                break
+            try:
+                description = DxgiAdapterDescription()
+                describe = method(adapter, 10, ctypes.c_int32, ctypes.POINTER(DxgiAdapterDescription))
+                if describe(adapter, ctypes.byref(description)) >= 0 and not description.flags & 2:
+                    rows.append((description.name, description.vendor, description.device,
+                                 (description.luid_high, description.luid_low), description.dedicated_video))
+            finally:
+                method(adapter, 2, ctypes.c_uint32)(adapter)
+    finally:
+        method(factory, 2, ctypes.c_uint32)(factory)
+    return rows
+
+
+def gpu_counter_values(counters):
+    engines, busy, dedicated = {}, {}, {}
+    for entries, field in (("engine", "UtilizationPercentage"), ("memory", "DedicatedUsage")):
+        for row in counters.get(entries, []):
+            name = row.get("Name") or ""
+            match = re.search(r"luid_0x([0-9a-f]+)_0x([0-9a-f]+)_phys_(\d+)", name, re.I)
+            if not match or row.get(field) is None:
+                continue
+            luid = (int(match[1], 16), int(match[2], 16))
+            value = float(row[field])
+            if entries == "engine":
+                engine = (luid, name[match.start(3):].casefold())
+                engines[engine] = engines.get(engine, 0) + value
+            else:
+                dedicated[luid] = dedicated.get(luid, 0) + value
+    for (luid, _), value in engines.items():
+        busy[luid] = min(100, max(busy.get(luid, 0), value))
+    return busy, dedicated
+
+
+def gpu_rows(adapters, controllers, counters, extra):
+    busy, dedicated = gpu_counter_values(counters or {})
+    rows = []
+    matched = set()
+    for name, vendor, device, luid, capacity in adapters:
+        identifier = f"VEN_{vendor:04X}&DEV_{device:04X}"
+        candidates = [(index, row) for index, row in enumerate(controllers) if index not in matched and (
+            name.casefold() == str(row.get("Name")).casefold() or identifier in (row.get("PNPDeviceID") or "").upper())]
+        driver = "—"
+        if candidates:
+            index, controller = candidates[0]
+            matched.add(index)
+            driver = controller.get("DriverVersion") or driver
+        usage = dedicated.get(luid)
+        rows.append([name, driver, busy.get(luid), None,
+                     usage / 2**20 if usage is not None else None, capacity / 2**20 if capacity else None, None])
+    for index, controller in enumerate(controllers):
+        if index not in matched:
+            rows.append([controller.get("Name") or "Display adapter", controller.get("DriverVersion") or "—",
+                         None, None, None, None, None])
+    enriched = set()
+    for telemetry in extra:
+        key = telemetry[0].casefold().removeprefix("nvidia ")
+        slot = next((index for index, row in enumerate(rows) if index not in enriched and
+                     row[0].casefold().removeprefix("nvidia ") == key), None)
+        if slot is None:
+            enriched.add(len(rows))
+            rows.append(list(telemetry))
+        else:
+            enriched.add(slot)
+            match = rows[slot]
+            match[1] = telemetry[1]
+            for index, value in enumerate(telemetry[2:], 2):
+                if match[index] is None:
+                    match[index] = value
+    totals = Counter(row[0] for row in rows)
+    indexes = Counter()
+    for row in rows:
+        name = row[0]
+        if totals[name] > 1:
+            indexes[name] += 1
+            row[0] = f"{name} ({indexes[name]})"
+    return rows
 
 
 def inventory_rows(data):

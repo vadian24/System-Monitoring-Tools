@@ -1,40 +1,39 @@
-# Nobara System Monitor
+# Linux System Monitor
 
-A local desktop monitor for Nobara KDE. The dashboard refreshes roughly every two seconds. The collector records events independently of the window, so closing or pausing the display does not interrupt an installed collector.
+A local desktop monitor for Linux desktops. The dashboard refreshes roughly every two seconds. The collector records events independently of the window, so closing or pausing the display does not interrupt an installed collector.
 
 ## Start now
 
-Extract the ZIP and open a KDE terminal in the extracted **Nobara-System-Monitor** folder. Run:
+Extract the ZIP and open a terminal in the extracted **Nobara-System-Monitor** folder. Run:
 
 ```bash
 python3 monitor.py
 ```
 
-If Python reports a missing dependency, install the Nobara packages:
+The installer uses system Python with PySide6 and psutil when available.
+Otherwise, it creates a private Python environment and downloads those
+packages from PyPI. The fallback requires Python's venv module, a Qt-compatible
+desktop runtime, and internet access. On Debian and Ubuntu, the venv package
+is `python3-venv`. On Fedora and Nobara, the native dependencies are
+`python3-pyside6` and `python3-psutil`.
 
-```bash
-sudo dnf install python3-pyside6 python3-psutil
-```
+The background service and journal features require a systemd user session
+and access to the relevant journal entries. You can launch the dashboard
+directly with `python3 monitor.py` if the dependencies are already installed.
 
-The portable GUI starts a detached collector on demand. Its lifetime across logout depends on the desktop session. For automatic startup at login and recovery after collector failure, install the user service and app launcher:
-
-```bash
-bash install.sh
-```
-
-Open **Nobara System Monitor** from the KDE application launcher. The installer uses your normal account and does not need sudo. If you tried the portable collector first, it may keep collecting until logout. The collector lock ensures only one instance writes to the same database. The installed service then takes over at the next login.
+Open **Linux System Monitor** from your application launcher. The installer uses your normal account and does not need sudo. If you tried the portable collector first, it may keep collecting until logout. The collector lock ensures only one instance writes to the same database. The installed service then takes over at the next login.
 
 ## What you can see
 
 - **Overview** shows CPU, RAM, storage writes, I/O pressure, recent faults, and up to seven days of activity charts. GPU charts below System Activity show utilization, temperature, VRAM used (solid) and total (dashed), and power draw. GPU history starts once this version of the collector runs.
 - **Processes** lists visible PIDs, user, CPU, memory, disk writes where the OS permits per-process I/O access, and process state. CPU can exceed 100% when multiple cores are in use.
 - **Services** shows loaded systemd system and user services, sockets and timers, including inactive and failed units. The collector logs observed transitions into and out of failed state.
-- **Hardware** shows CPU cores, PCI and USB devices, motherboard and BIOS data, storage and filesystem utilization, disk throughput and latency, network interfaces, and exported temperatures and fan speeds. NVIDIA utilization, VRAM, temperature, power and driver details come from `nvidia-smi` when available. Unsupported or inaccessible sensors show missing values. Device inventory is refreshed about every 45 seconds.
+- **Hardware** shows CPU cores, PCI and USB devices, motherboard and BIOS data, storage and filesystem utilization, disk throughput and latency, network interfaces, and exported temperatures and fan speeds. GPU readings come from Linux DRM, driver sensors and, for NVIDIA, `nvidia-smi` when available. A display adapter can appear even when its driver does not expose live counters or sensors. Device inventory is refreshed about every 45 seconds.
 - **Events** includes journal warnings and errors, plus specific events such as GPU faults, USB issues, drive timeouts, PCIe hardware errors, sleep and wake, crashes, and resource pressure warnings. Search by message or source, filter by category or severity, select a row for details, or export all matching retained event groups to CSV.
 
 ## Dashboard updates
 
-The dashboard checks GitHub on launch and every 30 minutes while it is open. Click **Update** when **Update Available** appears. The dashboard verifies the package against the GitHub manifest. It then updates the files, restarts the user service or portable collector as needed, and reopens. Existing history and network settings stay in the history directory. The update uses your current Python environment and runs without sudo.
+The dashboard checks GitHub when it opens. Use **Check for updates** in the header to check again. Click **Update** when **Update Available** appears. The dashboard verifies the package against the GitHub manifest. It then updates the files, restarts the user service or portable collector as needed, and reopens. Existing history and network settings stay in the history directory. The update uses your current Python environment and runs without sudo.
 
 ## Network Traffic
 
@@ -50,7 +49,7 @@ The dashboard checks GitHub on launch and every 30 minutes while it is open. Cli
 
 The collector imports up to seven days of readable journal history the first time it runs. It then follows the journal and resumes from its last recorded position when restarted. The app keeps seven days of sampled telemetry and up to 30 days or 25,000 event groups, whichever limit is reached first. Identical messages from the same source are grouped while they continue to arrive within two minutes of each other. That makes repeated warnings such as Razer command timeouts easier to count and inspect. Rates come from Linux counters. Missing or restricted readings are indicated in the GUI.
 
-The collector records sustained I/O stalls, CPU utilization and memory pressure, sustained temperatures above the thresholds provided by accessible sensors, and filesystems at or above 95% usage. Very short spikes can fall between samples. Some applications write only to private logs or their own files. Journal visibility depends on your account. The Overview shows whether the kernel journal and NVIDIA telemetry are accessible. The app does not change account permissions. SMART faults reported by `smartd` appear in Events if the service and journal are accessible. The collector does not run privileged SMART commands.
+The collector records sustained I/O stalls, CPU utilization and memory pressure, sustained temperatures above the thresholds provided by accessible sensors, and filesystems at or above 95% usage. Very short spikes can fall between samples. Some applications write only to private logs or their own files. Journal visibility depends on your account. The Overview shows whether the kernel journal and GPU telemetry are accessible. The app does not change account permissions. SMART faults reported by `smartd` appear in Events if the service and journal are accessible. The collector does not run privileged SMART commands.
 
 Telemetry remains local. The **Log folder** button opens the state folder, normally `~/.local/state/nobara-system-monitor`. History can contain remote IPs, process names, private paths and device information. Peer history retains up to seven days and 25,000 peer records.
 

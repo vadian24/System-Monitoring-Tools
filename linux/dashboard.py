@@ -277,32 +277,41 @@ class UpdateBanner(QWidget):
         self.autostart = autostart
         self.offer = None
         self.busy = False
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        row = QHBoxLayout()
+        layout.addLayout(row)
         self.notice = label("", "section")
-        row.addWidget(self.notice)
+        self.notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.notice.hide()
+        layout.addWidget(self.notice)
+        self.check_button = QPushButton("Check for updates")
+        self.check_button.clicked.connect(lambda: self.check(manual=True))
+        row.addWidget(self.check_button)
         self.button = QPushButton("Update")
         self.button.clicked.connect(self.install)
         self.button.hide()
         row.addWidget(self.button)
-        row.addStretch()
-        self.hide()
         self.finished.connect(self.complete, Qt.ConnectionType.QueuedConnection)
         previous = updater.read_json(state / "update-result.json")
-        if isinstance(previous, dict):
+        self.opening_result = isinstance(previous, dict)
+        if self.opening_result:
             try:
                 (state / "update-result.json").unlink(missing_ok=True)
             except OSError:
                 pass
             self.show_result("Update failed" if previous.get("error") else f"Updated to {previous.get('version')}",
                              previous.get("error", ""))
-        self.timer = QTimer(self, interval=30 * 60 * 1000)
-        self.timer.timeout.connect(self.check)
-        self.timer.start()
-        QTimer.singleShot(1200, self.check)
+        QTimer.singleShot(0, self.check_on_open)
+
+    def check_on_open(self):
+        self.check(preserve_status=self.opening_result)
 
     def start(self, action, work):
         self.busy = True
+        self.check_button.setEnabled(False)
+        self.button.setEnabled(False)
 
         def run():
             try:
@@ -312,33 +321,45 @@ class UpdateBanner(QWidget):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def check(self):
-        if not self.busy and (self.app / "version.json").is_file():
-            self.start("check", lambda: updater.check_update(self.app))
+    def check(self, *, manual=False, preserve_status=False):
+        if self.busy:
+            return
+        if manual:
+            self.show_result("Checking for updates…")
+        action = "manual" if manual else "startup-result" if preserve_status else "startup"
+        self.start(action, lambda: updater.check_update(self.app))
 
     def install(self):
         if self.busy or self.offer is None:
             return
         offer = self.offer
-        self.notice.setText("Downloading update…")
-        self.button.setEnabled(False)
+        self.show_result("Downloading update…")
         self.start("install", lambda: updater.stage_update(self.app, offer))
 
     def show_result(self, text, detail=""):
         self.notice.setText(text)
         self.notice.setToolTip(detail)
         self.setToolTip(detail)
-        self.show()
+        self.notice.show()
 
     @Slot(str, object)
     def complete(self, action, result):
         self.busy = False
-        if action == "check":
-            if not isinstance(result, Exception):
-                self.offer = result
-                self.button.setVisible(result is not None)
-                if result is not None:
-                    self.show_result("Update Available", f"Version {result['version']}")
+        self.check_button.setEnabled(True)
+        self.button.setEnabled(True)
+        if action != "install":
+            if isinstance(result, Exception):
+                if action != "startup-result":
+                    self.show_result("Update check failed", str(result))
+                return
+            self.offer = result
+            self.button.setVisible(result is not None)
+            if action == "startup-result" and self.notice.text() == "Update failed":
+                return
+            if result is not None:
+                self.show_result("Update Available", f"Version {result['version']}")
+            elif action == "manual":
+                self.show_result("Up to date")
             return
         if not isinstance(result, Exception):
             try:
@@ -349,8 +370,7 @@ class UpdateBanner(QWidget):
             else:
                 QApplication.quit()
                 return
-        self.show_result(f"Update failed · {result}"[:180], str(result))
-        self.button.setEnabled(True)
+        self.show_result("Update failed", str(result))
 
 
 class Window(QMainWindow):
@@ -366,7 +386,7 @@ class Window(QMainWindow):
         self.collector = None
         self.autostart = autostart
         self.start_attempted = False
-        self.setWindowTitle("Nobara System Monitor")
+        self.setWindowTitle("Linux System Monitor")
         self.resize(1200, 805)
         self.setMinimumSize(780, 570)
         base = QWidget(objectName="base")
@@ -378,7 +398,7 @@ class Window(QMainWindow):
         brand = QVBoxLayout()
         app_dir = Path(launcher).resolve().parent
         title_row = QHBoxLayout()
-        title_row.addWidget(label("Nobara System Monitor", "title"))
+        title_row.addWidget(label("Linux System Monitor", "title"))
         try:
             version = updater.installed_version(app_dir)
         except ValueError:
@@ -391,6 +411,9 @@ class Window(QMainWindow):
         brand.addWidget(self.subtitle)
         top.addLayout(brand)
         top.addStretch()
+        self.update_banner = UpdateBanner(app_dir, state, autostart)
+        top.addWidget(self.update_banner)
+        top.addStretch()
         self.live = label("Starting", "waiting")
         top.addWidget(self.live)
         self.pause = QPushButton("Pause display")
@@ -401,7 +424,6 @@ class Window(QMainWindow):
         self.start_button.clicked.connect(self.start_collector)
         top.addWidget(self.start_button)
         outer.addLayout(top)
-        outer.addWidget(UpdateBanner(app_dir, state, autostart))
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self.refresh_tab)
         outer.addWidget(self.tabs, 1)
@@ -457,9 +479,10 @@ class Window(QMainWindow):
         gpu_header = QHBoxLayout()
         gpu_header.addWidget(label("GPU activity", "section"))
         gpu_header.addStretch()
-        self.gpu_history_caption = label("Waiting for NVIDIA telemetry", "muted")
+        self.gpu_history_caption = label("Waiting for GPU telemetry", "muted")
         gpu_header.addWidget(self.gpu_history_caption)
         self.live_gpu_names = []
+        self.selected_gpu = None
         self.gpu_slot = QComboBox()
         self.gpu_slot.setMinimumContentsLength(12)
         self.gpu_slot.setVisible(False)
@@ -530,7 +553,7 @@ class Window(QMainWindow):
         self.gpu_caption.setWordWrap(True)
         self.hw_models = {}
         data = [
-            ("NVIDIA graphics", "gpu", ["GPU", "Driver", "Utilization", "Temperature", "VRAM used", "VRAM total", "Power"],
+            ("GPU telemetry", "gpu", ["GPU", "Driver", "Utilization", "Temperature", "VRAM used", "VRAM total", "Power"],
              {2: percent, 3: celsius, 4: lambda x: f"{x:g} MiB", 5: lambda x: f"{x:g} MiB", 6: lambda x: f"{x:g} W"}),
             ("Display adapters", "drm", ["Card", "Vendor", "PCI address", "Utilization", "Clock"],
              {3: percent, 4: lambda x: f"{x:,} MHz"}),
@@ -904,7 +927,7 @@ class Window(QMainWindow):
             self.uptime.setText(f"Uptime {duration(s['uptime'])}")
             alerts = "  •  Current alerts " + ", ".join(s["alerts"]) if s["alerts"] else ""
             self.coverage.setText(f"{s['scope']}  •  Kernel journal {self.settings.get('kernel_journal', 'checking').lower()}"
-                                  f"  •  NVIDIA telemetry {'live' if s['gpu'] else 'unavailable'}"
+                                  f"  •  GPU telemetry {'available' if any(any(value is not None for value in row[2:]) for row in s['gpu']) else 'unavailable'}"
                                   f"  •  RAM {size(s['ram_used'])} / {size(s['ram_total'])}  •  Swap {percent(s['swap'])}{alerts}")
         if time.monotonic() - self.history_tick > 12:
             self.refresh_history()
@@ -931,9 +954,17 @@ class Window(QMainWindow):
     def show_gpu_metrics(self):
         gpus = self.snapshot.get("gpu", [])
         names = [row[0] for row in gpus]
+        previous = self.gpu_slot.currentText()
         if names and names != self.live_gpu_names:
             self.set_gpu_names(list(enumerate(names)))
         self.live_gpu_names = names
+        if gpus and self.selected_gpu is None:
+            active = max(range(len(gpus)), key=lambda index: (
+                gpus[index][2] if gpus[index][2] is not None else -1, names[index] == previous))
+            if self.gpu_slot.currentIndex() != active:
+                self.gpu_slot.blockSignals(True)
+                self.gpu_slot.setCurrentIndex(active)
+                self.gpu_slot.blockSignals(False)
         slot = self.gpu_slot.currentData()
         metric = gpus[slot] if slot is not None and slot < len(gpus) else None
         if metric:
@@ -944,8 +975,16 @@ class Window(QMainWindow):
             values = ("—",) * 4
         for (widget, _), value in zip(self.gpu_cards, values):
             widget.setText(value)
-        self.gpu_history_caption.setText("NVIDIA telemetry live" if metric else "Live NVIDIA telemetry unavailable")
+        if not metric:
+            status = "Waiting for a display adapter"
+        elif metric[2] is None:
+            status = "Utilization unavailable"
+        else:
+            status = "GPU telemetry live"
+        self.gpu_history_caption.setText(status)
         self.gpu_history_caption.setToolTip(self.snapshot.get("gpu_status", ""))
+        if names and self.gpu_slot.currentText() != previous:
+            self.refresh_gpu_history(int(time.time() - self.range.currentData()))
 
     def set_gpu_names(self, names):
         old = self.gpu_slot.currentData()
@@ -953,13 +992,14 @@ class Window(QMainWindow):
         self.gpu_slot.clear()
         for slot, name in names:
             self.gpu_slot.addItem(name, slot)
-        selected = self.gpu_slot.findData(old)
+        selected = self.gpu_slot.findText(self.selected_gpu) if self.selected_gpu else self.gpu_slot.findData(old)
         if selected >= 0:
             self.gpu_slot.setCurrentIndex(selected)
         self.gpu_slot.setVisible(bool(names))
         self.gpu_slot.blockSignals(False)
 
     def gpu_changed(self, *_):
+        self.selected_gpu = self.gpu_slot.currentText()
         self.show_gpu_metrics()
         self.refresh_history()
 
@@ -974,8 +1014,8 @@ class Window(QMainWindow):
                     if names != [(self.gpu_slot.itemData(i), self.gpu_slot.itemText(i)) for i in range(self.gpu_slot.count())]:
                         self.set_gpu_names(names)
                 rows = db.execute("SELECT ts,utilization,temperature,vram_used,vram_total,power FROM gpu_history "
-                                  "WHERE ts>=? AND slot=? ORDER BY ts",
-                                  (cutoff, self.gpu_slot.currentData())).fetchall()
+                                  "WHERE ts>=? AND name=? ORDER BY ts",
+                                  (cutoff, self.gpu_slot.currentText())).fetchall()
         except sqlite3.Error:
             pass
         for column, (_, chart) in zip((1, 2, 3, 5), self.gpu_cards):
@@ -999,7 +1039,7 @@ class Window(QMainWindow):
                                  f"  •  User manager {self.snapshot.get('user_status', 'checking')}")
 
     def show_hardware(self):
-        self.gpu_caption.setText(f"NVIDIA telemetry · {self.snapshot.get('gpu_status', 'Checking')}")
+        self.gpu_caption.setText(f"GPU telemetry · {self.snapshot.get('gpu_status', 'Checking')}")
         for key, model in self.hw_models.items():
             rows = self.snapshot.get(key, [])
             model.set_rows(enumerate(rows) if key == "cores" else rows)
@@ -1047,7 +1087,7 @@ class Window(QMainWindow):
                                  f"First {local_time(first)}  /  Last {local_time(last)}  /  {count:,} occurrence(s)\n\n{message}")
 
     def export_events(self):
-        name, _ = QFileDialog.getSaveFileName(self, "Export matching events", "nobara-events.csv", "CSV files (*.csv)")
+        name, _ = QFileDialog.getSaveFileName(self, "Export matching events", "linux-events.csv", "CSV files (*.csv)")
         if not name:
             return
         try:
@@ -1067,8 +1107,9 @@ class Window(QMainWindow):
 
 
 def run(state, autostart, launcher):
+    updater.refresh_desktop_name(launcher.resolve().parent)
     application = QApplication([sys.argv[0]])
-    application.setApplicationName("Nobara System Monitor")
+    application.setApplicationName("Linux System Monitor")
     application.setDesktopFileName("nobara-system-monitor")
     application.setWindowIcon(QIcon(str(launcher.with_name("nobara-system-monitor.png"))))
     application.setStyle("Fusion")

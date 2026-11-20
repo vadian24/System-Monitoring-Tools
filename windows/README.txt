@@ -24,25 +24,26 @@ and remove System Monitor for Windows Collector.
 
 Dashboard updates
 -----------------
-Version 1.1.0 and later check GitHub on launch and every 30 minutes while
-the dashboard is open. When Update Available appears, click Update.
+The dashboard checks GitHub when it opens. Use Check for updates in the
+header to check again. When Update Available appears, click Update.
 The dashboard verifies the download, updates the per-user app files,
 restarts the collector as needed, and reopens. This uses your existing
 Python environment and preserves history, settings, and shortcuts.
 
 What the dashboard shows
 ------------------------
-- Overview: live CPU, RAM, disk reads and writes, and NVIDIA GPU utilization,
-  temperature, VRAM used and capacity, and power when nvidia-smi is available.
-  Network charts appear below GPU activity.
+- Overview: live CPU, RAM, disk reads and writes, and GPU activity for
+  detected display adapters, including virtual adapters. Utilization and
+  dedicated memory depend on the driver. NVIDIA temperature and power are
+  available when nvidia-smi exposes them. Network charts appear below GPU activity.
 - Processes: CPU, memory, and total process write I/O where permitted. On
   Windows this process counter can include non-disk I/O.
 - Services: Windows Service Control Manager entries and running, stopped,
   and paused states. Service failures are available in Events when logged.
 - Hardware: CPU/core activity, disks, filesystems, network interfaces,
   motherboard, BIOS, display adapters and USB controllers, where available.
-  General motherboard sensors, fan speeds, and live non-NVIDIA GPU readings
-  are not covered in this edition.
+  GPU utilization and memory are shown where the Windows graphics driver
+  exposes the counters. Virtual adapters may expose only their identity.
 - Events: recent critical, error and warning entries from the System and
   Application Event Logs, plus selected sleep and wake events and alerts from
   the monitor. Search/filter by message or source and export matching CSV.

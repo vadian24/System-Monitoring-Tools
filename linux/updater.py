@@ -1,4 +1,4 @@
-"""User-level GitHub updates shared by the Windows and Nobara monitors."""
+"""User-level GitHub updates for System Monitor."""
 import argparse
 from contextlib import contextmanager
 import hashlib
@@ -54,6 +54,30 @@ def installed_version(app):
     version = data.get("version") if isinstance(data, dict) else None
     version_key(version)
     return version
+
+
+def refresh_desktop_name(app):
+    if app != (Path.home() / ".local/share/nobara-system-monitor").resolve():
+        return
+    data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    desktop = data / "applications/nobara-system-monitor.desktop"
+    if desktop.is_symlink():
+        return
+    pending = desktop.with_name(f".{desktop.name}.{os.getpid()}.tmp")
+    try:
+        original = desktop.read_text(encoding="utf-8")
+        updated = original.replace("Name=Nobara System Monitor\n", "Name=Linux System Monitor\n", 1)
+        if updated != original:
+            pending.write_text(updated, encoding="utf-8")
+            pending.chmod(desktop.stat().st_mode & 0o777)
+            pending.replace(desktop)
+    except (OSError, UnicodeError):
+        pass
+    finally:
+        try:
+            pending.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def download(name, limit):

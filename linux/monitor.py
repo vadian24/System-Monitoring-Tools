@@ -1,12 +1,15 @@
 #!/usr/bin/python3
-"""Local Nobara telemetry collector and Qt desktop launcher."""
+"""Local Linux telemetry collector and Qt desktop launcher."""
 import argparse
+from collections import Counter
 import csv
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
 import re
 import selectors
+import shlex
 import signal
 import sqlite3
 import subprocess
@@ -336,26 +339,157 @@ def drm_metrics():
     return rows
 
 
-def gpu():
+def nvidia_gpu():
     if not Path("/proc/driver/nvidia/version").exists():
-        return [], "No loaded NVIDIA driver"
-    result, status, error = command(["nvidia-smi", "--query-gpu=name,driver_version,utilization.gpu,temperature.gpu,memory.used,memory.total,power.draw",
-                                     "--format=csv,noheader,nounits"])
-    rows = []
+        return {}
+    result, status, _ = command(["nvidia-smi",
+                                 "--query-gpu=pci.bus_id,name,driver_version,utilization.gpu,temperature.gpu,memory.used,memory.total,power.draw",
+                                 "--format=csv,noheader,nounits"])
+    rows = {}
     for row in csv.reader(result.splitlines(), skipinitialspace=True):
-        if status == 0 and len(row) == 7:
+        if status == 0 and len(row) == 8:
             values = []
-            for field in row[2:]:
+            for field in row[3:]:
                 try:
                     values.append(float(field))
                 except ValueError:
                     values.append(None)
-            rows.append([*row[:2], *values])
-    return rows, "Live" if rows else (error or result.strip() or "NVIDIA telemetry unavailable")[:180]
+            rows[row[0][-12:].lower()] = [*row[1:3], *values]
+    return rows
+
+
+@lru_cache(maxsize=32)
+def gpu_name(device_id, fallback):
+    if re.fullmatch(r"[\da-f]{4}:[\da-f]{2}:[\da-f]{2}\.\d", device_id, re.I):
+        result, status, _ = command(["lspci", "-mm", "-s", device_id])
+        if status == 0 and result:
+            try:
+                fields = shlex.split(result.splitlines()[0])
+            except ValueError:
+                fields = []
+            if len(fields) >= 4:
+                return " ".join(fields[2:4])
+    return fallback
+
+
+def read_number(path, divisor=1):
+    value = read(path)
+    try:
+        return int(value) / divisor
+    except ValueError:
+        return None
+
+
+def drm_clients(devices):
+    clients = {}
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            with os.scandir(proc / "fd") as entries:
+                for fd in entries:
+                    try:
+                        target = os.readlink(fd.path)
+                    except OSError:
+                        continue
+                    device = devices.get(target)
+                    if device is None:
+                        continue
+                    fields = dict(line.split(":\t", 1) for line in read(proc / "fdinfo" / fd.name).splitlines()
+                                  if ":\t" in line and line.startswith("drm-"))
+                    client = fields.get("drm-client-id")
+                    if client is not None:
+                        clients.setdefault((device, client), fields)
+        except OSError:
+            continue
+    return clients
+
+
+def engine_activity(clients, previous, elapsed):
+    def count(fields, key):
+        value = fields.get(key, "").split()
+        return int(value[0]) if value and value[0].isdecimal() else None
+
+    loads = {}
+    if elapsed <= 0:
+        return {}
+    for (device, client), fields in clients.items():
+        old = previous.get((device, client), {})
+        for key in fields:
+            if key.startswith("drm-engine-") and not key.startswith("drm-engine-capacity-"):
+                engine = key.removeprefix("drm-engine-")
+                capacity = count(fields, "drm-engine-capacity-" + engine) or 1
+                interval = elapsed * 1e9 * capacity
+            elif key.startswith("drm-cycles-"):
+                engine = key.removeprefix("drm-cycles-")
+                if "drm-engine-" + engine in fields:
+                    continue
+                total_key = "drm-total-cycles-" + engine
+                current, baseline = count(fields, total_key), count(old, total_key)
+                if current is None or baseline is None:
+                    continue
+                interval = current - baseline
+            else:
+                continue
+            current, baseline = count(fields, key), count(old, key)
+            if current is not None and baseline is not None and current >= baseline and interval > 0:
+                slot = (device, engine)
+                loads[slot] = loads.get(slot, 0) + 100 * (current - baseline) / interval
+    busy = {}
+    for (device, _), value in loads.items():
+        busy[device] = min(100, max(busy.get(device, 0), value))
+    return busy
+
+
+def linux_gpu_worker(sampler):
+    previous = {}
+    last = time.monotonic()
+    while not STOP.is_set():
+        rows_by_pci = nvidia_gpu()
+        devices = {}
+        pending = {}
+        for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
+            device = card / "device"
+            if not re.fullmatch(r"card\d+", card.name) or not device.exists():
+                continue
+            pci = device.resolve().name
+            if pci in rows_by_pci:
+                continue
+            driver_link = device / "driver"
+            driver = driver_link.resolve().name if driver_link.is_symlink() else "—"
+            name = gpu_name(pci, f"{driver} ({card.name})" if driver != "—" else card.name)
+            util = read_number(device / "gpu_busy_percent")
+            used = read_number(device / "mem_info_vram_used", 2**20)
+            total = read_number(device / "mem_info_vram_total", 2**20)
+            hwmon = next(iter(sorted(device.glob("hwmon/hwmon*"))), None)
+            temp = read_number(hwmon / "temp1_input", 1000) if hwmon else None
+            power = read_number(hwmon / "power1_average", 10**6) if hwmon else None
+            if hwmon and power is None:
+                power = read_number(hwmon / "power1_input", 10**6)
+            row = [name, driver, util, temp, used, total, power]
+            if util is None:
+                pending[pci] = row
+                devices[f"/dev/dri/{card.name}"] = pci
+                for render in card.glob("device/drm/renderD*"):
+                    devices[f"/dev/dri/{render.name}"] = pci
+            rows_by_pci[pci] = row
+        tick = time.monotonic()
+        clients = drm_clients(devices) if devices else {}
+        for pci, utilization in engine_activity(clients, previous, tick - last).items():
+            pending[pci][2] = utilization
+        previous, last = clients, tick
+        names = Counter(row[0] for row in rows_by_pci.values())
+        for pci, row in rows_by_pci.items():
+            if names[row[0]] > 1:
+                row[0] = f"{row[0]} ({pci})"
+        rows = list(rows_by_pci.values())
+        sampler.gpu_metrics = rows, ("Display adapters detected. Readings depend on the graphics driver."
+                                     if rows else "No display adapters detected")
+        STOP.wait(4)
 
 
 class Sampler:
     def __init__(self):
+        self.gpu_metrics = [], "Checking display adapters"
+        threading.Thread(target=linux_gpu_worker, args=(self,), name="graphics", daemon=True).start()
         self.last = time.monotonic()
         self.disk = psutil.disk_io_counters(perdisk=True, nowrap=False) or {}
         self.net = psutil.net_io_counters(pernic=True, nowrap=False) or {}
@@ -448,7 +582,7 @@ class Sampler:
                                         f"{key[0]} unit changed state from {old} to {active}."))
             self.known_services.update(current_services)
             self.next_services = tick + 12
-        gpus, gpu_status = gpu()
+        gpus, gpu_status = self.gpu_metrics
         return dict(ts=time.time(), cpu=cpu, cores=cores, memory=memory.percent, ram_used=memory.total-memory.available,
                     ram_total=memory.total, swap=swap.percent, pressure=psi, disk=drives, net=interfaces, gpu=gpus,
                     gpu_status=gpu_status, drm=drm_metrics(), processes=processes, inventory=self.inventory,

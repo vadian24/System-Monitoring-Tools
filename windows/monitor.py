@@ -406,6 +406,7 @@ def windows_inventory_worker(sampler):
         data, error = windows_platform.powershell_json(windows_platform.INVENTORY_SCRIPT, timeout=22)
         rows, displays, disks = windows_platform.inventory_rows(data)
         if rows:
+            sampler.windows_video_controllers = data.get("Win32_VideoController", [])
             sampler.windows_inventory = (
                 [("System", "Windows build", ".".join(map(str, sys.getwindowsversion().platform_version))),
                  ("Memory", "Physical RAM", size(psutil.virtual_memory().total))] + rows, displays, disks
@@ -413,6 +414,23 @@ def windows_inventory_worker(sampler):
         elif error:
             print(f"Windows hardware inventory: {error}", flush=True)
         STOP.wait(90)
+
+
+def windows_gpu_worker(sampler):
+    adapters = []
+    next_inventory = 0
+    while not STOP.is_set():
+        tick = time.monotonic()
+        if tick >= next_inventory:
+            adapters = windows_platform.dxgi_adapters()
+            next_inventory = tick + 45
+        controllers = sampler.windows_video_controllers
+        counters, _ = windows_platform.powershell_json(windows_platform.GPU_COUNTERS_SCRIPT, timeout=8)
+        extra, _ = gpu()
+        rows = windows_platform.gpu_rows(adapters, controllers, counters, extra)
+        status = "Display adapters detected. Readings depend on the Windows graphics driver." if rows else "No display adapters detected"
+        sampler.windows_gpu = rows, status
+        STOP.wait(4)
 
 
 class Sampler:
@@ -431,8 +449,11 @@ class Sampler:
         self.known_services = {}
         self.next_inventory = self.next_services = 0
         self.windows_inventory = ([("System", "Hardware inventory", "Waiting for Windows hardware information")], [], {})
+        self.windows_video_controllers = []
+        self.windows_gpu = [], "Checking display adapters"
         if WINDOWS:
             threading.Thread(target=windows_inventory_worker, args=(self,), name="inventory", daemon=True).start()
+            threading.Thread(target=windows_gpu_worker, args=(self,), name="graphics", daemon=True).start()
         psutil.cpu_percent()
         psutil.cpu_percent(percpu=True)
 
@@ -534,7 +555,7 @@ class Sampler:
                                         f"{key[0]} unit changed state from {old} to {active}."))
             self.known_services.update(current_services)
             self.next_services = tick + 12
-        gpus, gpu_status = gpu()
+        gpus, gpu_status = self.windows_gpu if WINDOWS else gpu()
         return dict(ts=time.time(), cpu=cpu, cores=cores, memory=memory.percent, ram_used=memory.total-memory.available,
                     ram_total=memory.total, swap=swap.percent, pressure=psi, disk=drives, net=interfaces, gpu=gpus,
                     gpu_status=gpu_status, drm=displays if WINDOWS else drm_metrics(), processes=processes,
