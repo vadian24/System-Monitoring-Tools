@@ -2,14 +2,14 @@
   "schema": 1,
   "platforms": {
     "linux": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "file": "Nobara-System-Monitor.zip",
-      "sha256": "c620212c8eeb812cfe151f43ca4c223c9e732425ecf266b74c8618fa6c7e8827"
+      "sha256": "c23684a0666bddc1a05eb2130bb1e8cf46a5eb336d13de3905dc20e73abe067d"
     },
     "windows": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "file": "System-Monitor-Windows.zip",
-      "sha256": "fef6abaa19dc8b20e0741189f8538be2c7dc8004c04f0e4ab689f474d0f16e4a"
+      "sha256": "5a771cbf894cd45ef705dff3cd105eb2e3de439153f01ff59500427595eea32f"
     }
   }
 }

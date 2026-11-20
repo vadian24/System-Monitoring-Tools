@@ -377,7 +377,17 @@ class Window(QMainWindow):
         outer.setSpacing(10)
         top = QHBoxLayout()
         brand = QVBoxLayout()
-        brand.addWidget(label(APP_TITLE, "title"))
+        app_dir = Path(launcher).resolve().parent
+        title_row = QHBoxLayout()
+        title_row.addWidget(label(APP_TITLE, "title"))
+        try:
+            version = updater.installed_version(app_dir)
+        except ValueError:
+            pass
+        else:
+            title_row.addWidget(label(f"v{version}", "muted"))
+        title_row.addStretch()
+        brand.addLayout(title_row)
         self.subtitle = label("Live telemetry and system events", "muted")
         brand.addWidget(self.subtitle)
         top.addLayout(brand)
@@ -392,7 +402,7 @@ class Window(QMainWindow):
         self.start_button.clicked.connect(self.start_collector)
         top.addWidget(self.start_button)
         outer.addLayout(top)
-        outer.addWidget(UpdateBanner(Path(launcher).resolve().parent, state, autostart))
+        outer.addWidget(UpdateBanner(app_dir, state, autostart))
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self.refresh_tab)
         outer.addWidget(self.tabs, 1)
