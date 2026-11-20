@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 from uuid import UUID
 
 import psutil
@@ -17,6 +18,7 @@ from network import probe_target
 
 EVENT_LEVEL = {1: 2, 2: 3, 3: 4, 4: 6}
 CHANNELS = ("System", "Application")
+TASKBAR_APP_ID = "Vadian24.SystemMonitoringTools.WindowsMonitor"
 EVENT_RULES = [
     ("Graphics", r"nvlddmkm|amdkmdag|igfx|display driver|^display\b|graphics"),
     ("Storage", r"stornvme|storahci|storport|\bdisk\b|ntfs|volmgr|bad block|\bI/O error"),
@@ -245,6 +247,70 @@ def refresh_shortcut_names(launcher):
                                "MONITOR_PYTHONW": str(root / "Python" / "Scripts" / "pythonw.exe")})
 
 
+class PropertyKey(ctypes.Structure):
+    _fields_ = [("format_id", ctypes.c_uint32 * 4), ("property_id", ctypes.c_uint32)]
+
+
+class PropertyValue(ctypes.Union):
+    _fields_ = [("text", ctypes.c_wchar_p), ("storage", ctypes.c_byte * 16)]
+
+
+class PropertyVariant(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_uint16), ("reserved", ctypes.c_uint16 * 3), ("value", PropertyValue)]
+
+
+def set_taskbar_app_id():
+    set_app_id = ctypes.WinDLL("shell32").SetCurrentProcessExplicitAppUserModelID
+    set_app_id.argtypes = (ctypes.c_wchar_p,)
+    set_app_id.restype = ctypes.c_int32
+    set_app_id(TASKBAR_APP_ID)
+
+
+def taskbar_relaunch_properties(launcher, state, autostart):
+    python = Path(sys.executable)
+    windowed = python.with_name("pythonw.exe")
+    command = [str(windowed if windowed.is_file() else python), str(launcher.resolve()), "--state-dir", str(state)]
+    if not autostart:
+        command.append("--no-start")
+    # Set the relaunch command, icon and display name before the window's AppUserModelID.
+    return (
+        (2, subprocess.list2cmdline(command)),
+        (3, f"{launcher.resolve().with_name('system-monitor.ico')},0"),
+        (4, "Windows System Monitor"),
+        (5, TASKBAR_APP_ID),
+    )
+
+
+def set_taskbar_window_properties(hwnd, properties):
+    get_store = ctypes.WinDLL("shell32").SHGetPropertyStoreForWindow
+    guid = ctypes.c_uint32 * 4
+    get_store.argtypes = (ctypes.c_void_p, ctypes.POINTER(guid), ctypes.POINTER(ctypes.c_void_p))
+    get_store.restype = ctypes.c_int32
+    store = ctypes.c_void_p()
+    iid = guid.from_buffer_copy(UUID("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99").bytes_le)
+    if get_store(hwnd, ctypes.byref(iid), ctypes.byref(store)) < 0:
+        return
+
+    try:
+        set_value = com_method(store, 6, ctypes.c_int32, ctypes.POINTER(PropertyKey), ctypes.POINTER(PropertyVariant))
+        format_id = guid.from_buffer_copy(UUID("9f4c2855-9f79-4b39-a8d0-e1d42de1d5f3").bytes_le)
+        for pid, text in properties:
+            key = PropertyKey(format_id, pid)
+            value = PropertyVariant()  # VT_EMPTY removes a window property.
+            if text is not None:
+                value.type = 31  # VT_LPWSTR
+                value.value.text = text
+            if set_value(store, ctypes.byref(key), ctypes.byref(value)) < 0:
+                break
+    finally:
+        com_method(store, 2, ctypes.c_uint32)(store)
+
+
+def com_method(pointer, index, result, *arguments):
+    table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    return ctypes.WINFUNCTYPE(result, ctypes.c_void_p, *arguments)(table[index])
+
+
 class DxgiAdapterDescription(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_wchar * 128),
@@ -258,10 +324,6 @@ class DxgiAdapterDescription(ctypes.Structure):
 
 
 def dxgi_adapters():
-    def method(pointer, index, result, *arguments):
-        table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-        return ctypes.WINFUNCTYPE(result, ctypes.c_void_p, *arguments)(table[index])
-
     try:
         create = ctypes.WinDLL("dxgi").CreateDXGIFactory1
     except (AttributeError, OSError):
@@ -274,21 +336,21 @@ def dxgi_adapters():
         return []
     rows = []
     try:
-        enumerate_adapter = method(factory, 12, ctypes.c_int32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p))
+        enumerate_adapter = com_method(factory, 12, ctypes.c_int32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p))
         for index in range(64):
             adapter = ctypes.c_void_p()
             if enumerate_adapter(factory, index, ctypes.byref(adapter)) < 0:
                 break
             try:
                 description = DxgiAdapterDescription()
-                describe = method(adapter, 10, ctypes.c_int32, ctypes.POINTER(DxgiAdapterDescription))
+                describe = com_method(adapter, 10, ctypes.c_int32, ctypes.POINTER(DxgiAdapterDescription))
                 if describe(adapter, ctypes.byref(description)) >= 0 and not description.flags & 2:
                     rows.append((description.name, description.vendor, description.device,
                                  (description.luid_high, description.luid_low), description.dedicated_video))
             finally:
-                method(adapter, 2, ctypes.c_uint32)(adapter)
+                com_method(adapter, 2, ctypes.c_uint32)(adapter)
     finally:
-        method(factory, 2, ctypes.c_uint32)(factory)
+        com_method(factory, 2, ctypes.c_uint32)(factory)
     return rows
 
 

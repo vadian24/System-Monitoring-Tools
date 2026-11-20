@@ -1120,6 +1120,10 @@ class Window(QMainWindow):
 
 
 def run(state, autostart, launcher):
+    if WINDOWS:
+        from windows_platform import (refresh_shortcut_names, set_taskbar_app_id,
+                                      set_taskbar_window_properties, taskbar_relaunch_properties)
+        set_taskbar_app_id()
     application = QApplication([sys.argv[0]])
     application.setApplicationName(APP_TITLE)
     if not WINDOWS:
@@ -1129,8 +1133,15 @@ def run(state, autostart, launcher):
     application.setFont(QFont("Inter", 10))
     application.setStyleSheet(THEME)
     window = Window(state, autostart, launcher)
+    if WINDOWS:
+        hwnd = int(window.winId())
+        properties = taskbar_relaunch_properties(launcher, state, autostart)
+        set_taskbar_window_properties(hwnd, properties)
     window.show()
     if WINDOWS:
-        from windows_platform import refresh_shortcut_names
         threading.Thread(target=refresh_shortcut_names, args=(launcher,), daemon=True).start()
-    return application.exec()
+    try:
+        return application.exec()
+    finally:
+        if WINDOWS:
+            set_taskbar_window_properties(hwnd, ((pid, None) for pid, _ in properties))

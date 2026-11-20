@@ -30,6 +30,12 @@ The dashboard verifies the download, updates the per-user app files,
 restarts the collector as needed, and reopens. This uses your existing
 Python environment and preserves history, settings, and shortcuts.
 
+Pin to the taskbar
+------------------
+Open Windows System Monitor, right-click its running taskbar icon, and
+choose Pin to taskbar. If you pinned the app before version 1.1.5 and the
+old pin opens Python, unpin that shortcut and pin the running dashboard again.
+
 What the dashboard shows
 ------------------------
 - Overview: live CPU, RAM, disk reads and writes, and GPU activity for

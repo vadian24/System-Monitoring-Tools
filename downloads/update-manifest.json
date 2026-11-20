@@ -7,9 +7,9 @@
       "sha256": "55be9a39bb5fe8635fe3239b11a3350dea622a7f3e618bd61d7c832defcecebc"
     },
     "windows": {
-      "version": "1.1.4",
+      "version": "1.1.5",
       "file": "System-Monitor-Windows.zip",
-      "sha256": "933294288de64ac3887bdc5c2e7c27728b8afdef643345ed10cb52643cf75101"
+      "sha256": "8a49738a8e0dfd3c0ac65b7a364c3db64bea8db2d5a56917433f2ee867c02f00"
     }
   }
 }
