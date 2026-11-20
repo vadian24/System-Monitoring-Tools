@@ -16,11 +16,11 @@ BEGIN
  BEGIN
   BLOCK "040904b0"
   BEGIN
-   VALUE "FileDescription", "System Monitor for Windows Setup"
+   VALUE "FileDescription", "Windows System Monitor Setup"
    VALUE "FileVersion", "1.0.0.0"
    VALUE "InternalName", "SystemMonitorSetup.exe"
    VALUE "OriginalFilename", "SystemMonitorSetup.exe"
-   VALUE "ProductName", "System Monitor for Windows"
+   VALUE "ProductName", "Windows System Monitor"
    VALUE "ProductVersion", "1.0.0.0"
   END
  END

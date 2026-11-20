@@ -60,6 +60,32 @@ foreach ($entry in @(
 ConvertTo-Json -InputObject $rows -Depth 3 -Compress
 """
 
+SHORTCUT_RENAME_SCRIPT = r"""
+$shell = New-Object -ComObject WScript.Shell
+$arguments = '"' + $env:MONITOR_MAIN + '"'
+foreach ($location in @('Programs', 'Startup')) {
+    $directory = $shell.SpecialFolders.Item($location)
+    if (-not $directory) { continue }
+    $suffix = if ($location -eq 'Startup') { ' Collector.lnk' } else { '.lnk' }
+    $expected = if ($location -eq 'Startup') { $arguments + ' --collect' } else { $arguments }
+    $old = Join-Path $directory ('System Monitor for Windows' + $suffix)
+    if (-not (Test-Path -LiteralPath $old -PathType Leaf)) { continue }
+    $shortcut = $shell.CreateShortcut($old)
+    if ($shortcut.TargetPath -ne $env:MONITOR_PYTHONW -or $shortcut.Arguments -ne $expected) { continue }
+
+    $new = Join-Path $directory ('Windows System Monitor' + $suffix)
+    if (-not (Test-Path -LiteralPath $new)) {
+        Move-Item -LiteralPath $old -Destination $new
+    } else {
+        $current = $shell.CreateShortcut($new)
+        if ($current.TargetPath -eq $shortcut.TargetPath -and $current.Arguments -eq $expected) {
+            Remove-Item -LiteralPath $old
+        }
+    }
+}
+'{}'
+"""
+
 EVENT_SCRIPT = r"""
 $channel = $env:MONITOR_EVENT_CHANNEL
 $cursor = [long]$env:MONITOR_EVENT_CURSOR
@@ -205,6 +231,18 @@ def nvidia_tool():
         if candidate.is_file():
             return str(candidate)
     return None
+
+
+def refresh_shortcut_names(launcher):
+    root = os.environ.get("LOCALAPPDATA")
+    if not root:
+        return
+    root = (Path(root) / "SystemMonitorWindows").resolve()
+    if launcher.resolve() != root / "App" / "monitor.py":
+        return
+    powershell_json(SHORTCUT_RENAME_SCRIPT, timeout=5,
+                    variables={"MONITOR_MAIN": str(launcher.resolve()),
+                               "MONITOR_PYTHONW": str(root / "Python" / "Scripts" / "pythonw.exe")})
 
 
 class DxgiAdapterDescription(ctypes.Structure):

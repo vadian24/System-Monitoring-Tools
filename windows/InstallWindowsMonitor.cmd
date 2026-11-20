@@ -1,6 +1,6 @@
 @echo off
 setlocal DisableDelayedExpansion
-title Install System Monitor for Windows
+title Install Windows System Monitor
 py -3 -c "import struct,sys; sys.exit(0 if sys.version_info >= (3,12) and struct.calcsize('P') == 8 else 1)" >nul 2>&1
 if not errorlevel 1 (
     py -3 "%~dp0install_windows.py" %*

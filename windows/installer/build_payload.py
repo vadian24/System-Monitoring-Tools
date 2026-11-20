@@ -23,8 +23,8 @@ Double-click SystemMonitorSetup.exe. If needed, setup downloads and
 installs CPython for your account, then installs the dashboard and adds
 a Start menu shortcut. Internet access is required. Setup adds a
 background collector at sign-in. To disable collector startup, open
-shell:startup from Windows Run and remove the System Monitor for
-Windows Collector shortcut.
+shell:startup from Windows Run and remove the Windows System Monitor
+Collector shortcut.
 
 When upgrading, close the old dashboard before setup. Setup restarts
 the background collector and keeps existing history.

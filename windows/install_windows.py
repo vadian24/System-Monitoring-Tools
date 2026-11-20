@@ -11,7 +11,7 @@ import venv
 
 
 FILES = ("monitor.py", "dashboard.py", "network.py", "updater.py", "version.json", "windows_platform.py", "system-monitor.ico", "README.txt")
-TITLE = "System Monitor for Windows"
+TITLE = "Windows System Monitor"
 SHORTCUT_SCRIPT = """
 $ErrorActionPreference = 'Stop'
 $shell = New-Object -ComObject WScript.Shell
@@ -28,12 +28,20 @@ function New-MonitorShortcut($path, $collector) {
     $shortcut.Description = 'Local hardware, service, network, and event monitor'
     $shortcut.Save()
 }
-New-MonitorShortcut (Join-Path $folder 'System Monitor for Windows.lnk') $false
-$collectorLink = Join-Path $startup 'System Monitor for Windows Collector.lnk'
+New-MonitorShortcut (Join-Path $folder 'Windows System Monitor.lnk') $false
+$collectorLink = Join-Path $startup 'Windows System Monitor Collector.lnk'
 if ($env:MONITOR_BOOT -eq '1') {
     New-MonitorShortcut $collectorLink $true
-} elseif (Test-Path -LiteralPath $collectorLink) {
-    Remove-Item -LiteralPath $collectorLink
+} else {
+    foreach ($path in @($collectorLink, (Join-Path $startup 'System Monitor for Windows Collector.lnk'))) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $shortcut = $shell.CreateShortcut($path)
+            if ($shortcut.TargetPath -eq $env:MONITOR_PYTHONW -and
+                $shortcut.Arguments -eq ('"' + $env:MONITOR_MAIN + '" --collect')) {
+                Remove-Item -LiteralPath $path
+            }
+        }
+    }
 }
 """
 

@@ -21,7 +21,7 @@ import updater
 from monitor import WINDOWS, database, is_loopback, size
 from network import probe_target, save_probe_target, save_watchlist, watch_codes, watchlist
 
-APP_TITLE = "System Monitor for Windows" if WINDOWS else "Nobara System Monitor"
+APP_TITLE = "Windows System Monitor" if WINDOWS else "Linux System Monitor"
 COLORS = ["#76ccff", "#c8a2ff", "#6fe1bd", "#ffbb76"]
 LEVELS = {0: "Emergency", 1: "Alert", 2: "Critical", 3: "Error", 4: "Warning", 5: "Notice", 6: "Info", 7: "Debug"}
 THEME = """
@@ -1130,4 +1130,7 @@ def run(state, autostart, launcher):
     application.setStyleSheet(THEME)
     window = Window(state, autostart, launcher)
     window.show()
+    if WINDOWS:
+        from windows_platform import refresh_shortcut_names
+        threading.Thread(target=refresh_shortcut_names, args=(launcher,), daemon=True).start()
     return application.exec()

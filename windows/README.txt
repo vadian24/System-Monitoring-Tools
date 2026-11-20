@@ -10,7 +10,7 @@ Install
 3. Double-click InstallWindowsMonitor.cmd. It downloads Python dependencies
    from PyPI (internet required), installs the monitor for your account, and
    opens the dashboard.
-4. To open it again, search Start for System Monitor for Windows.
+4. To open it again, search Start for Windows System Monitor.
 
 When upgrading, close the old dashboard before running setup. Setup restarts
 the background collector and keeps existing history.
@@ -20,7 +20,7 @@ collector to your Windows Startup folder. It runs at sign-in and keeps
 recording after you close the dashboard. To install without a sign-in
 collector, run InstallWindowsMonitor.cmd --no-startup from Command Prompt.
 To disable collector startup later, open shell:startup from Windows Run
-and remove System Monitor for Windows Collector.
+and remove Windows System Monitor Collector.
 
 Dashboard updates
 -----------------

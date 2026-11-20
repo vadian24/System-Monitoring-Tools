@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$Host.UI.RawUI.WindowTitle = 'System Monitor for Windows Setup'
+$Host.UI.RawUI.WindowTitle = 'Windows System Monitor Setup'
 $runtimeVersion = '3.14.10'
 $pythonUrl = 'https://www.python.org/ftp/python/3.14.10/python-3.14.10-amd64.exe'
 $pythonSha256 = '92480239264744fe0386a1bd8275786fefa126e3129e56a68e22b52c73329965'
@@ -50,7 +50,7 @@ try {
     if (-not $env:LOCALAPPDATA) { throw 'Windows did not provide a local application folder for this account.' }
     $root = Join-Path $env:LOCALAPPDATA 'SystemMonitorWindows'
     $runtime = Join-Path $root ('Runtime-' + $runtimeVersion)
-    Write-Host 'System Monitor for Windows Setup' -ForegroundColor Cyan
+    Write-Host 'Windows System Monitor Setup' -ForegroundColor Cyan
     Write-Host 'This installs the dashboard for your Windows account.'
     $stage = Join-Path ([IO.Path]::GetTempPath()) ('SystemMonitorSetup-' + [guid]::NewGuid().ToString('N'))
     New-Item -Path $stage -ItemType Directory | Out-Null
@@ -86,7 +86,7 @@ try {
     $installer = Join-Path $stage 'System-Monitor-Windows\install_windows.py'
     & $python -I $installer
     if ($LASTEXITCODE -ne 0) { throw "Dashboard installation failed (exit code $LASTEXITCODE)." }
-    Write-Host 'Setup complete. Open System Monitor for Windows from Start.' -ForegroundColor Cyan
+    Write-Host 'Setup complete. Open Windows System Monitor from Start.' -ForegroundColor Cyan
 } catch {
     $exitCode = 1
     Write-Host ''

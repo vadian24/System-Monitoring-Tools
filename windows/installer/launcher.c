@@ -74,7 +74,7 @@ static const void *resource(unsigned id, Dword *length) {
 
 static void fail(const Wide *message) {
     if (*payload_path) DeleteFileW(payload_path);
-    MessageBoxW(0, message, L"System Monitor for Windows Setup", 0x10);
+    MessageBoxW(0, message, L"Windows System Monitor Setup", 0x10);
     ExitProcess(1);
 }
 
