@@ -23,7 +23,7 @@ This walkthrough shows the Nobara Linux dashboard, including live GPU charts, sy
 2. Setup reuses a compatible Python installation or downloads and verifies Python from python.org. It installs the dashboard for your account, creates a Start menu shortcut, and starts the background collector at sign-in.
 3. To open the dashboard again, search Start for **System Monitor for Windows**.
 
-The installer is unsigned and may show a Windows SmartScreen warning. The earlier Windows monitor was tested in a Windows VM. When upgrading, close the old dashboard before setup. If the old collector was running, sign out and back in to restart it. The [manual Windows package](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/System-Monitor-Windows.zip) is also available for users who already have Python.
+The installer is unsigned and may show a Windows SmartScreen warning. The earlier Windows monitor was tested in a Windows VM. When upgrading, close the old dashboard before setup. Setup restarts the background collector and preserves existing history. The [manual Windows package](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/System-Monitor-Windows.zip) is also available for users who already have Python.
 
 ## Linux
 
@@ -36,6 +36,8 @@ The [Linux guide](linux/README.md) lists dependencies and explains the user serv
 ## Dashboard updates
 
 Install version 1.1.0 or later once to add the updater. Both dashboards check GitHub shortly after opening and every 30 minutes while open. When **Update Available** appears, click **Update**. The dashboard verifies the download, replaces the per-user application files, restarts the collector as needed, and reopens. Monitoring history and settings stay in the local history folder.
+
+If an older Windows dashboard says its running collector does not support automatic restart, close the dashboard and run the current Windows setup once. Future updates can then run from the dashboard.
 
 ## Network activity and log access
 

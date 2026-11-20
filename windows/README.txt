@@ -12,9 +12,8 @@ Install
    opens the dashboard.
 4. To open it again, search Start for System Monitor for Windows.
 
-When upgrading, close the old dashboard before running setup. If the old
-collector was running in the background, sign out and back in after setup
-to restart it. Existing history is kept.
+When upgrading, close the old dashboard before running setup. Setup restarts
+the background collector and keeps existing history.
 
 Administrator rights are not required. The installer adds a background
 collector to your Windows Startup folder. It runs at sign-in and keeps

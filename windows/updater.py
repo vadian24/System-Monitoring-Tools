@@ -197,14 +197,54 @@ def collector_running(state):
         return not locked
 
 
-def stop_collector(app, state, managed):
+def stop_legacy_windows_collector(app, state):
+    owner = psutil.Process().username().casefold()
+    launcher = app / "monitor.py"
+    default_state = Path(os.environ["LOCALAPPDATA"]) / "SystemMonitorWindows" / "History"
+    candidates = []
+    for process in psutil.process_iter(["name", "username", "cmdline"]):
+        command = process.info["cmdline"] or []
+        if (process.info["name"] or "").casefold() not in {"python.exe", "pythonw.exe"}:
+            continue
+        if (process.info["username"] or "").casefold() != owner or len(command) < 3:
+            continue
+        if Path(command[1]) != launcher or command[2] != "--collect":
+            continue
+        arguments = command[3:]
+        if not arguments:
+            collector_state = default_state
+        elif len(arguments) == 2 and arguments[0] == "--state-dir":
+            collector_state = Path(arguments[1])
+        else:
+            continue
+        if collector_state == state:
+            candidates.append(process)
+
+    # Legacy collectors have no shutdown request handler. Restrict termination
+    # to this account's Python collector for the exact app and history paths.
+    for process in candidates:
+        try:
+            process.terminate()
+        except psutil.NoSuchProcess:
+            continue
+    _, active = psutil.wait_procs(candidates, timeout=10)
+    if active or collector_running(state):
+        raise RuntimeError("The updater couldn't stop the collector for this installation.")
+
+
+def stop_collector(app, state, managed, *, setup=False):
     if managed:
         systemctl("stop", check=True)
         return
     if not collector_running(state):
+        if WINDOWS and setup:
+            stop_legacy_windows_collector(app, state)
         return
     token = read_json(state / "collector-process.json")
     if matching_process(token) is None:
+        if WINDOWS:
+            stop_legacy_windows_collector(app, state)
+            return
         raise RuntimeError("The running collector does not support automatic restart. Sign out and back in, then retry.")
     if Path(token.get("app", "")).resolve() != app:
         raise RuntimeError("This history folder is in use by another installation. Update from that dashboard.")
@@ -236,9 +276,9 @@ def wait_for_sample(app, state, started):
     raise RuntimeError("The updated collector did not produce a live sample.")
 
 
-def install_staged(stage, app, state, autostart):
+def install_staged(stage, app, state, autostart, *, setup=False):
     next_app = stage / "next"
-    if version_key(installed_version(next_app)) <= version_key(installed_version(app)):
+    if not setup and version_key(installed_version(next_app)) <= version_key(installed_version(app)):
         return
     names = [name for name in (*COMMON_FILES, *PACKAGES[PLATFORM][1]) if name != "version.json"]
     names.append("version.json")
@@ -250,7 +290,7 @@ def install_staged(stage, app, state, autostart):
     restart_attempted = False
     stopped = False
     try:
-        stop_collector(app, state, managed)
+        stop_collector(app, state, managed, setup=setup)
         stopped = True
         with exclusive_lock(state / "collector.lock") as locked:
             if not locked:

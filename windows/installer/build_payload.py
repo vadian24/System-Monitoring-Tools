@@ -26,9 +26,8 @@ background collector at sign-in. To disable collector startup, open
 shell:startup from Windows Run and remove the System Monitor for
 Windows Collector shortcut.
 
-If upgrading from a build without dashboard updates, close the old
-dashboard before setup and sign out and back in to restart any old
-collector. Existing history is kept.
+When upgrading, close the old dashboard before setup. Setup restarts
+the background collector and keeps existing history.
 
 ''' + readme[end:]
     z.writestr(prefix+'README.txt',readme)
