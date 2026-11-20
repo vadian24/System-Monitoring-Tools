@@ -7,15 +7,17 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 
-from PySide6.QtCore import QAbstractTableModel, QLocale, QModelIndex, QRectF, Qt, QTimer, QUrl
+from PySide6.QtCore import QAbstractTableModel, QLocale, QModelIndex, QRectF, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
                                QPushButton, QPlainTextEdit, QScrollArea, QSizePolicy,
                                QTabWidget, QTableView, QVBoxLayout, QWidget)
 
+import updater
 from monitor import database, size
 from network import probe_target, save_probe_target, save_watchlist, watch_codes, watchlist
 
@@ -265,6 +267,92 @@ def add_probe_cards(layout):
     return cards, caption
 
 
+class UpdateBanner(QWidget):
+    finished = Signal(str, object)
+
+    def __init__(self, app, state, autostart):
+        super().__init__()
+        self.app = app
+        self.state = state
+        self.autostart = autostart
+        self.offer = None
+        self.busy = False
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.notice = label("", "section")
+        row.addWidget(self.notice)
+        self.button = QPushButton("Update")
+        self.button.clicked.connect(self.install)
+        self.button.hide()
+        row.addWidget(self.button)
+        row.addStretch()
+        self.hide()
+        self.finished.connect(self.complete, Qt.ConnectionType.QueuedConnection)
+        previous = updater.read_json(state / "update-result.json")
+        if isinstance(previous, dict):
+            try:
+                (state / "update-result.json").unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.show_result("Update failed" if previous.get("error") else f"Updated to {previous.get('version')}",
+                             previous.get("error", ""))
+        self.timer = QTimer(self, interval=30 * 60 * 1000)
+        self.timer.timeout.connect(self.check)
+        self.timer.start()
+        QTimer.singleShot(1200, self.check)
+
+    def start(self, action, work):
+        self.busy = True
+
+        def run():
+            try:
+                self.finished.emit(action, work())
+            except Exception as error:
+                self.finished.emit(action, error)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def check(self):
+        if not self.busy and (self.app / "version.json").is_file():
+            self.start("check", lambda: updater.check_update(self.app))
+
+    def install(self):
+        if self.busy or self.offer is None:
+            return
+        offer = self.offer
+        self.notice.setText("Downloading update…")
+        self.button.setEnabled(False)
+        self.start("install", lambda: updater.stage_update(self.app, offer))
+
+    def show_result(self, text, detail=""):
+        self.notice.setText(text)
+        self.notice.setToolTip(detail)
+        self.setToolTip(detail)
+        self.show()
+
+    @Slot(str, object)
+    def complete(self, action, result):
+        self.busy = False
+        if action == "check":
+            if not isinstance(result, Exception):
+                self.offer = result
+                self.button.setVisible(result is not None)
+                if result is not None:
+                    self.show_result("Update Available", f"Version {result['version']}")
+            return
+        if not isinstance(result, Exception):
+            try:
+                self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+                updater.hand_off(result, self.app, self.state, self.autostart)
+            except OSError as error:
+                result = error
+            else:
+                QApplication.quit()
+                return
+        self.show_result(f"Update failed · {result}"[:180], str(result))
+        self.button.setEnabled(True)
+
+
 class Window(QMainWindow):
     def __init__(self, state, autostart, launcher):
         super().__init__()
@@ -303,6 +391,7 @@ class Window(QMainWindow):
         self.start_button.clicked.connect(self.start_collector)
         top.addWidget(self.start_button)
         outer.addLayout(top)
+        outer.addWidget(UpdateBanner(Path(launcher).resolve().parent, state, autostart))
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self.refresh_tab)
         outer.addWidget(self.tabs, 1)

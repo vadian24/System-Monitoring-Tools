@@ -23,6 +23,14 @@ collector, run InstallWindowsMonitor.cmd --no-startup from Command Prompt.
 To disable collector startup later, open shell:startup from Windows Run
 and remove System Monitor for Windows Collector.
 
+Dashboard updates
+-----------------
+Version 1.1.0 and later check GitHub on launch and every 30 minutes while
+the dashboard is open. When Update Available appears, click Update.
+The dashboard verifies the download, updates the per-user app files,
+restarts the collector as needed, and reopens. This uses your existing
+Python environment and preserves history, settings, and shortcuts.
+
 What the dashboard shows
 ------------------------
 - Overview: live CPU, RAM, disk reads and writes, and NVIDIA GPU utilization,

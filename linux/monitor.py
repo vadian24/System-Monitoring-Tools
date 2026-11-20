@@ -2,7 +2,6 @@
 """Local Nobara telemetry collector and Qt desktop launcher."""
 import argparse
 import csv
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -16,6 +15,8 @@ import threading
 import time
 
 import psutil
+
+import updater
 
 from network import NetworkHealthSampler, NetworkSampler, connectivity_samples
 
@@ -460,12 +461,10 @@ class Sampler:
 def collector():
     os.umask(0o077)
     STATE.mkdir(parents=True, exist_ok=True)
-    with (STATE / "collector.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+    with updater.exclusive_lock(STATE / "collector.lock") as locked:
+        if not locked:
             return
-        with database() as db:
+        with updater.collector_registration(STATE, Path(__file__).resolve().parent) as token, database() as db:
             initialize(db)
             with db:
                 setting(db, "session_started", time.time())
@@ -475,7 +474,7 @@ def collector():
             journal.start()
             probes.start()
             try:
-                run_samples(db)
+                run_samples(db, token)
             finally:
                 STOP.set()
                 journal.join(timeout=7)
@@ -521,7 +520,7 @@ def store_peers(db, now, rows):
         """, (*peer, country, pids, states, now, now, sent, received, flagged))
 
 
-def run_samples(db):
+def run_samples(db, token=None):
     sampler = Sampler()
     network = NetworkSampler(STATE, command)
     conditions = {}
@@ -532,7 +531,7 @@ def run_samples(db):
     timeout_total = None
     drop_total = carrier_total = 0
     previous_tick = time.monotonic()
-    while not STOP.is_set():
+    while not STOP.is_set() and not updater.stop_requested(STATE, token):
         tick = time.monotonic()
         try:
             snapshot, events, gap = sampler.sample()

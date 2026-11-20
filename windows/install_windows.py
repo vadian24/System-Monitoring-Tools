@@ -9,7 +9,7 @@ import sys
 import venv
 
 
-FILES = ("monitor.py", "dashboard.py", "network.py", "windows_platform.py", "system-monitor.ico", "README.txt")
+FILES = ("monitor.py", "dashboard.py", "network.py", "updater.py", "version.json", "windows_platform.py", "system-monitor.ico", "README.txt")
 TITLE = "System Monitor for Windows"
 SHORTCUT_SCRIPT = """
 $ErrorActionPreference = 'Stop'

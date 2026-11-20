@@ -16,14 +16,13 @@ import time
 
 import psutil
 
+import updater
+
 from network import NetworkSampler
 
 WINDOWS = sys.platform == "win32"
 if WINDOWS:
-    import msvcrt
     import windows_platform
-else:
-    import fcntl
 
 if WINDOWS:
     STATE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "SystemMonitorWindows" / "History"
@@ -115,18 +114,6 @@ def initialize(db):
     """)
     if "disk_read" not in {column[1] for column in db.execute("PRAGMA table_info(samples)")}:
         db.execute("ALTER TABLE samples ADD COLUMN disk_read REAL")
-
-
-def lock_collector(lock):
-    try:
-        if WINDOWS:
-            lock.seek(0)
-            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return False
-    return True
 
 
 def is_loopback(name):
@@ -561,10 +548,10 @@ class Sampler:
 def collector():
     os.umask(0o077)
     STATE.mkdir(parents=True, exist_ok=True)
-    with (STATE / "collector.lock").open("a+b") as lock:
-        if not lock_collector(lock):
+    with updater.exclusive_lock(STATE / "collector.lock") as locked:
+        if not locked:
             return
-        with database() as db:
+        with updater.collector_registration(STATE, Path(__file__).resolve().parent) as token, database() as db:
             initialize(db)
             with db:
                 setting(db, "session_started", time.time())
@@ -580,7 +567,7 @@ def collector():
                 probes = threading.Thread(target=probe_worker, name="network-probes", daemon=True)
                 probes.start()
             try:
-                run_samples(db)
+                run_samples(db, token)
             finally:
                 STOP.set()
                 journal.join(timeout=7)
@@ -629,7 +616,7 @@ def store_peers(db, now, rows):
         """, (*peer, country, pids, states, now, now, sent, received, flagged))
 
 
-def run_samples(db):
+def run_samples(db, token=None):
     sampler = Sampler()
     network = NetworkSampler(STATE, command)
     conditions = {}
@@ -640,7 +627,7 @@ def run_samples(db):
     retransmit_total = None
     drop_total = link_total = 0
     previous_tick = time.monotonic()
-    while not STOP.is_set():
+    while not STOP.is_set() and not updater.stop_requested(STATE, token):
         tick = time.monotonic()
         try:
             snapshot, events, gap = sampler.sample()

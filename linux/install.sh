@@ -18,7 +18,7 @@ if ! /usr/bin/python3 -c 'import PySide6, psutil' 2>/dev/null; then
 fi
 
 install -d "$app_dir" "$config_dir/systemd/user" "$desktop_dir"
-install -m 644 "$source_dir/monitor.py" "$source_dir/dashboard.py" "$source_dir/network.py" "$app_dir/"
+install -m 644 "$source_dir/monitor.py" "$source_dir/dashboard.py" "$source_dir/network.py" "$source_dir/updater.py" "$source_dir/version.json" "$app_dir/"
 install -m 644 "$source_dir/nobara-system-monitor.png" "$app_dir/"
 install -m 644 "$source_dir/nobara-system-monitor.service" "$config_dir/systemd/user/"
 /usr/bin/python3 - "$app_dir" "$desktop_dir" <<'PY'

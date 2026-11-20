@@ -32,6 +32,10 @@ Open **Nobara System Monitor** from the KDE application launcher. The installer 
 - **Hardware** shows CPU cores, PCI and USB devices, motherboard and BIOS data, storage and filesystem utilization, disk throughput and latency, network interfaces, and exported temperatures and fan speeds. NVIDIA utilization, VRAM, temperature, power and driver details come from `nvidia-smi` when available. Unsupported or inaccessible sensors show missing values. Device inventory is refreshed about every 45 seconds.
 - **Events** includes journal warnings and errors, plus specific events such as GPU faults, USB issues, drive timeouts, PCIe hardware errors, sleep and wake, crashes, and resource pressure warnings. Search by message or source, filter by category or severity, select a row for details, or export all matching retained event groups to CSV.
 
+## Dashboard updates
+
+The dashboard checks GitHub on launch and every 30 minutes while it is open. Click **Update** when **Update Available** appears. The dashboard verifies the package against the GitHub manifest. It then updates the files, restarts the user service or portable collector as needed, and reopens. Existing history and network settings stay in the history directory. The update uses your current Python environment and runs without sudo.
+
 ## Network Traffic
 
 - Interface charts show receive and send rates across non-loopback interfaces. The charts average observations over each history interval. VPNs and virtual interfaces can count traffic at more than one layer.

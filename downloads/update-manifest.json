@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "platforms": {
+    "linux": {
+      "version": "1.1.0",
+      "file": "Nobara-System-Monitor.zip",
+      "sha256": "c620212c8eeb812cfe151f43ca4c223c9e732425ecf266b74c8618fa6c7e8827"
+    },
+    "windows": {
+      "version": "1.1.0",
+      "file": "System-Monitor-Windows.zip",
+      "sha256": "fef6abaa19dc8b20e0741189f8538be2c7dc8004c04f0e4ab689f474d0f16e4a"
+    }
+  }
+}

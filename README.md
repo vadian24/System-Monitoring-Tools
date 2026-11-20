@@ -31,6 +31,10 @@ The installer is unsigned and may show a Windows SmartScreen warning. The earlie
 
 The [Linux guide](linux/README.md) lists dependencies and explains the user service.
 
+## Dashboard updates
+
+Install version 1.1.0 or later once to add the updater. Both dashboards check GitHub shortly after opening and every 30 minutes while open. When **Update Available** appears, click **Update**. The dashboard verifies the download, replaces the per-user application files, restarts the collector as needed, and reopens. Monitoring history and settings stay in the local history folder.
+
 ## Network activity and log access
 
 Both editions show Receive, Send, Packet Drops, and separate router and internet Latency and Probe Loss charts in Overview and Network Traffic. Linux graphs TCP retransmission timeouts. Windows graphs TCP segments retransmitted. Router probes use the IPv4 default gateway. You can change or disable the default internet probe (`1.1.1.1`) in Network Traffic.
@@ -46,6 +50,8 @@ bash windows/installer/build.sh
 ```
 
 The output is `windows/installer/.build/SystemMonitorSetup.exe`. Set `LLVM_BIN` to the LLVM binaries directory if those commands are outside your `PATH`.
+
+For a dashboard update, increase the version in each affected platform's `version.json`. Rebuild its download and publish the ZIP, its SHA-256, and the matching version in `downloads/update-manifest.json` together. For Windows, rebuild the setup executable as well.
 
 [SHA-256 checksums for downloads](downloads/SHA256SUMS)
 
