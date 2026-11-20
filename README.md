@@ -4,8 +4,10 @@ Local desktop monitors for Windows and Linux. Both versions offer a live dashboa
 
 | Platform | Download | Source and documentation |
 | --- | --- | --- |
-| Windows 10/11, x64 | [SystemMonitorSetup.exe](downloads/SystemMonitorSetup.exe?raw=true) | [Windows source](windows/) · [Windows guide](windows/README.txt) |
-| Nobara Linux with KDE Plasma | [Nobara-System-Monitor.zip](downloads/Nobara-System-Monitor.zip?raw=true) | [Linux source](linux/) · [Linux guide](linux/README.md) |
+| Windows 10/11, x64 | [SystemMonitorSetup.exe](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/SystemMonitorSetup.exe) | [Windows source](windows/) · [Windows guide](windows/README.txt) |
+| Nobara Linux with KDE Plasma | [Nobara-System-Monitor.zip](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/Nobara-System-Monitor.zip) | [Linux source](linux/) · [Linux guide](linux/README.md) |
+
+These links download the files directly. If the GitHub file view shows **Error Loading Page**, use the download links above or the ones in the [downloads folder](downloads/).
 
 ## Demo
 
@@ -21,7 +23,7 @@ This walkthrough shows the Nobara Linux dashboard, including live GPU charts, sy
 2. Setup reuses a compatible Python installation or downloads and verifies Python from python.org. It installs the dashboard for your account, creates a Start menu shortcut, and starts the background collector at sign-in.
 3. To open the dashboard again, search Start for **System Monitor for Windows**.
 
-The installer is unsigned and may show a Windows SmartScreen warning. The earlier Windows monitor was tested in a Windows VM. When upgrading, close the old dashboard before setup. If the old collector was running, sign out and back in to restart it. The [manual Windows package](downloads/System-Monitor-Windows.zip?raw=true) is also available for users who already have Python.
+The installer is unsigned and may show a Windows SmartScreen warning. The earlier Windows monitor was tested in a Windows VM. When upgrading, close the old dashboard before setup. If the old collector was running, sign out and back in to restart it. The [manual Windows package](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/System-Monitor-Windows.zip) is also available for users who already have Python.
 
 ## Linux
 
