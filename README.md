@@ -8,12 +8,14 @@ System Monitor stores and processes your metrics, event logs, observed network c
 
 The dashboard contacts GitHub to check for and download updates. Network Traffic sends test pings to your router and to an internet probe target, which defaults to 1.1.1.1. You can change or disable the internet probe in Network Traffic. Setup may also download software dependencies.
 
-| Platform | Download | Source and documentation |
-| --- | --- | --- |
-| Windows 10/11, x64 | [SystemMonitorSetup.exe](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/SystemMonitorSetup.exe) | [Windows source](windows/) · [Windows guide](windows/README.txt) |
-| Linux desktop | [Linux-System-Monitor.zip](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/Linux-System-Monitor.zip) | [Linux source](linux/) · [Linux guide](linux/README.md) |
+## Downloads
 
-These links download the files directly. If the GitHub file view shows **Error Loading Page**, use the download links above or the ones in the [downloads folder](downloads/).
+| Platform | Latest download | Source and documentation |
+| --- | --- | --- |
+| Windows 10/11, x64 | [Windows 1.1.5 installer](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/windows/1.1.5/SystemMonitorSetup.exe) | [Windows source](windows/) · [Windows guide](windows/README.txt) |
+| Linux desktop | [Linux 1.1.3 ZIP](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/linux/1.1.3/Linux-System-Monitor.zip) | [Linux source](linux/) · [Linux guide](linux/README.md) |
+
+These links download the files directly. If the GitHub file view shows **Error Loading Page**, use a direct download link. Browse the [download archive](downloads/) for earlier versions.
 
 ## Demo
 
@@ -29,7 +31,7 @@ This walkthrough shows the Linux dashboard, including live GPU charts, system ev
 2. Setup reuses a compatible Python installation or downloads and verifies Python from python.org. It installs the dashboard for your account, creates a Start menu shortcut, and starts the background collector at sign-in.
 3. To open the dashboard again, search Start for **Windows System Monitor**.
 
-The installer is unsigned and may show a Windows SmartScreen warning. The earlier Windows monitor was tested in a Windows VM. When upgrading, close the old dashboard before setup. Setup restarts the background collector and preserves existing history. The [manual Windows package](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/System-Monitor-Windows.zip) is also available for users who already have Python.
+The installer is unsigned and may show a Windows SmartScreen warning. The earlier Windows monitor was tested in a Windows VM. When upgrading, close the old dashboard before setup. Setup restarts the background collector and preserves existing history. The [manual Windows package](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/windows/1.1.5/System-Monitor-Windows.zip) is also available for users who already have Python.
 
 ## Linux
 
@@ -61,7 +63,7 @@ bash windows/installer/build.sh
 
 The output is `windows/installer/.build/SystemMonitorSetup.exe`. Set `LLVM_BIN` to the LLVM binaries directory if those commands are outside your `PATH`.
 
-For a dashboard update, increase the version in each affected platform's `version.json`. Rebuild its download and publish the ZIP, its SHA-256, and the matching version in `downloads/update-manifest.json` together. For Windows, rebuild the setup executable as well. Publish the same Linux ZIP under both the public download name and the manifest filename so older dashboards can still update.
+For a dashboard update, increase the version in each affected platform's `version.json` and rebuild its packages, including the Windows setup executable when applicable. Add the release files and `SHA256SUMS` under `downloads/<platform>/<version>/`, then update the latest links in both READMEs and the archive index. In the same commit, refresh the latest package files and checksums in `downloads/` and update `downloads/update-manifest.json`. Keep the filenames used by the updater and leave earlier version folders in place.
 
 [SHA-256 checksums for downloads](downloads/SHA256SUMS)
 
