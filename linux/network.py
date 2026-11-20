@@ -8,12 +8,138 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import time
 
 import psutil
 
 DEFAULT_WATCH = frozenset({"KR", "KP"})
+DEFAULT_PROBE_TARGET = "1.1.1.1"
 COUNTRY_CODE = re.compile(r"[A-Z]{2}")
 OWNER = re.compile(r'"([^"]+)",pid=(\d+)')
+
+
+def validate_probe_target(text):
+    if not text:
+        return ""
+    address = ipaddress.ip_address(text)
+    if address.is_unspecified or address.is_multicast or address.is_link_local or "%" in text:
+        raise ValueError("Enter a unicast IPv4 or IPv6 address, or leave it blank to disable the internet probe.")
+    return str(address)
+
+
+def probe_target(state):
+    try:
+        return validate_probe_target((state / "probe-target").read_text().strip())
+    except (OSError, ValueError):
+        return DEFAULT_PROBE_TARGET
+
+
+def save_probe_target(state, text):
+    target = validate_probe_target(text.strip())
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = state / f".probe-target-{os.getpid()}.tmp"
+    temporary.write_text(target + "\n", encoding="utf-8")
+    temporary.replace(state / "probe-target")
+    return target
+
+
+def default_gateway():
+    routes = []
+    try:
+        lines = Path("/proc/net/route").read_text().splitlines()[1:]
+    except OSError:
+        return ""
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 8 or fields[1] != "00000000" or fields[7] != "00000000":
+            continue
+        try:
+            address = int(fields[2], 16)
+            if address and int(fields[3], 16) & 3 == 3:
+                gateway = str(ipaddress.IPv4Address(address.to_bytes(4, "little")))
+                routes.append((int(fields[6]), gateway))
+        except (ValueError, OverflowError):
+            continue
+    return min(routes)[1] if routes else ""
+
+
+def ping_metrics(target, command):
+    output, code, error = command(["ping", "-n", "-c", "3", "-i", "0.3", "-W", "1", "--", target], timeout=3)
+    if "Network is unreachable" in error:
+        return None, None, "No route to target"
+    if code not in (0, 1):
+        return None, None, "Ping unavailable"
+    loss = re.search(r"(\d+(?:\.\d+)?)% packet loss", output)
+    latency = re.search(r"=\s*[\d.]+/([\d.]+)/[\d.]+/[\d.]+\s+ms", output)
+    if not loss:
+        return None, None, "No probe result"
+    lost = float(loss[1])
+    return float(latency[1]) if latency else None, lost, "No replies" if lost == 100 else ""
+
+
+def connectivity_samples(state, command):
+    targets = (("router", default_gateway(), "No IPv4 default gateway"),
+               ("internet", probe_target(state), "Disabled"))
+    for kind, target, status in targets:
+        metrics = ping_metrics(target, command) if target else (None, None, status)
+        yield kind, target, *metrics
+
+
+def tcp_timeout_count():
+    try:
+        lines = Path("/proc/net/netstat").read_text().splitlines()
+        for header, values in zip(lines[::2], lines[1::2]):
+            if header.startswith("TcpExt:") and values.startswith("TcpExt:"):
+                return int(dict(zip(header.split(), values.split()))["TCPTimeouts"])
+    except (OSError, KeyError, ValueError):
+        pass
+    return None
+
+
+class NetworkHealthSampler:
+    def __init__(self):
+        self.timeouts = None
+        self.carrier = {}
+        self.last = None
+
+    def sample(self, interfaces, previous_interfaces):
+        tick = time.clock_gettime(time.CLOCK_BOOTTIME)
+        continuous = self.last is not None and tick - self.last <= 10
+        self.last = tick
+        current_timeouts = tcp_timeout_count()
+        timeouts = None
+        if continuous and current_timeouts is not None and self.timeouts is not None:
+            if current_timeouts >= self.timeouts:
+                timeouts = current_timeouts - self.timeouts
+        self.timeouts = current_timeouts
+
+        drops = carrier_losses = 0
+        carrier = {}
+        events = []
+        for name, current in interfaces.items():
+            if name == "lo":
+                continue
+            previous = previous_interfaces.get(name)
+            if continuous and previous is not None:
+                dropped = max(0, current.dropin - previous.dropin) + max(0, current.dropout - previous.dropout)
+                drops += dropped
+                if dropped:
+                    events.append((4, "Network", name, "Interface reported packet drops."))
+            device = Path("/sys/class/net") / name
+            if not (device / "device").exists():
+                continue
+            try:
+                count = int((device / "carrier_down_count").read_text())
+            except (OSError, ValueError):
+                continue
+            carrier[name] = count
+            if continuous and name in self.carrier and count > self.carrier[name]:
+                carrier_losses += count - self.carrier[name]
+                events.append((4, "Network", name, "Physical network interface lost carrier."))
+        self.carrier = carrier
+        if timeouts:
+            events.append((4, "Network", "TCP", "Linux recorded TCP retransmission timeouts."))
+        return timeouts, drops, carrier_losses, events
 
 
 def watch_codes(value):

@@ -1,4 +1,6 @@
 """Windows inventory, Service Control Manager and Event Log adapters."""
+import ctypes
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -7,6 +9,8 @@ import shutil
 import subprocess
 
 import psutil
+
+from network import probe_target
 
 
 EVENT_LEVEL = {1: 2, 2: 3, 3: 4, 4: 6}
@@ -18,7 +22,7 @@ EVENT_RULES = [
     ("Kernel", r"whea-logger|bugcheck|machine check|hardware error|kernel-general"),
     ("Power / Firmware", r"kernel-power|power-troubleshooter|firmware|\bacpi\b"),
     ("Input / USB", r"usb|driverframeworks|kernel-pnp"),
-    ("Network", r"ndis|wlan|tcpip|network adapter|dhcp|^dns"),
+    ("Network", r"ndis|wlan|tcpip|network adapter|dhcp|dns-client|^dns"),
     ("Services", r"service control manager"),
     ("Application", r"application (?:error|hang)|windows error reporting|\.net runtime"),
 ]
@@ -74,6 +78,86 @@ $rows = @(
 )
 ConvertTo-Json -InputObject @{ rows=$rows; reset=[bool]$reset } -Depth 5 -Compress
 """
+
+
+PROBE_SCRIPT = r"""
+function Measure-Target($kind, $target, $unavailable) {
+    $row = @{kind=$kind; target=$target; latency=$null; loss=$null; status=$unavailable}
+    if ($target) {
+        $ping = [System.Net.NetworkInformation.Ping]::new()
+        try {
+            $address = [System.Net.IPAddress]::Parse($target)
+            $times = @(for ($i=0; $i -lt 3; $i++) {
+                $reply = $ping.Send($address, 900)
+                if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                    $reply.RoundtripTime
+                }
+                if ($i -lt 2) { Start-Sleep -Milliseconds 300 }
+            })
+            $row.loss = (3 - $times.Count) * 100.0 / 3
+            if ($times.Count) {
+                $row.latency = ($times | Measure-Object -Average).Average
+                $row.status = ''
+            } else {
+                $row.status = 'No replies'
+            }
+        } catch {
+            $row.status = 'Ping unavailable'
+        } finally {
+            $ping.Dispose()
+        }
+    }
+    $row
+}
+$gateway = ''
+$routerStatus = 'No IPv4 default gateway'
+try {
+    $metrics = @{}
+    Get-NetIPInterface -AddressFamily IPv4 | ForEach-Object { $metrics[$_.InterfaceIndex] = $_.InterfaceMetric }
+    $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore |
+        Where-Object { $_.NextHop -ne '0.0.0.0' -and $metrics.ContainsKey($_.InterfaceIndex) } |
+        Sort-Object -Property @{Expression={$_.RouteMetric + $metrics[$_.InterfaceIndex]}} | Select-Object -First 1
+    if ($route) { $gateway = [string]$route.NextHop }
+} catch {
+    $routerStatus = 'Gateway lookup unavailable'
+}
+$rows = @((Measure-Target 'router' $gateway $routerStatus),
+          (Measure-Target 'internet' ([string]$env:MONITOR_PROBE_TARGET) 'Disabled'))
+ConvertTo-Json -InputObject $rows -Compress
+"""
+
+
+@lru_cache(maxsize=1)
+def tcp_statistics_api():
+    try:
+        getter = ctypes.WinDLL("iphlpapi").GetTcpStatisticsEx
+        getter.argtypes = (ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32)
+        getter.restype = ctypes.c_uint32
+        return getter
+    except (AttributeError, OSError):
+        return None
+
+
+def tcp_retransmit_counts():
+    getter = tcp_statistics_api()
+    counts = {}
+    if getter is not None:
+        for family in (2, 23):  # Windows AF_INET and AF_INET6
+            statistics = (ctypes.c_uint32 * 15)()  # MIB_TCPSTATS consists of 15 32-bit fields.
+            if getter(statistics, family) == 0:
+                counts[family] = statistics[11]  # dwRetransSegs
+    return counts
+
+
+def connectivity_samples(state):
+    target = probe_target(state)
+    rows, error = powershell_json(PROBE_SCRIPT, variables={"MONITOR_PROBE_TARGET": target}, timeout=13)
+    if isinstance(rows, list):
+        for row in rows:
+            yield row["kind"], row["target"], row["latency"], row["loss"], row["status"]
+    else:
+        yield "router", "", None, None, "Probe unavailable"
+        yield "internet", target, None, None, "Probe unavailable" if target else "Disabled"
 
 
 def powershell_json(script, *, variables=None, timeout=20):

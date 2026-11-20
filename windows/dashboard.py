@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGr
                                QTabWidget, QTableView, QVBoxLayout, QWidget)
 
 from monitor import WINDOWS, database, is_loopback, size
-from network import save_watchlist, watch_codes, watchlist
+from network import probe_target, save_probe_target, save_watchlist, watch_codes, watchlist
 
 APP_TITLE = "System Monitor for Windows" if WINDOWS else "Nobara System Monitor"
 COLORS = ["#76ccff", "#c8a2ff", "#6fe1bd", "#ffbb76"]
@@ -177,6 +177,7 @@ class Spark(QWidget):
         self.ceiling = ceiling
         self.points = []
         self.reference = []
+        self.reference_color = None
         self.setMinimumHeight(64)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -193,27 +194,35 @@ class Spark(QWidget):
             line = rect.top() + rect.height() * ratio
             painter.setPen(QPen(QColor("#303b50"), 1))
             painter.drawLine(rect.left(), line, rect.right(), line)
-        valid = [(stamp, value) for stamp, value in self.points if value is not None]
-        if len(valid) < 2:
+        values = [value for series in (self.points, self.reference) for _, value in series if value is not None]
+        if not values:
             painter.setPen(QColor("#97a7be"))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Collecting history…")
             return
-        start, end = self.points[0][0], self.points[-1][0]
-        capacity = [(stamp, value) for stamp, value in self.reference if value is not None]
-        scale = self.ceiling or max(1, max(value for _, value in valid + capacity))
-        for points, pen in ((capacity, QPen(QColor("#adbbce"), 1, Qt.PenStyle.DashLine)),
-                            (valid, QPen(self.color, 2))):
+        series = [points for points in (self.points, self.reference) if points]
+        start = min(points[0][0] for points in series)
+        end = max(points[-1][0] for points in series)
+        scale = self.ceiling or max(1, max(values))
+        reference_pen = QPen(self.reference_color or QColor("#adbbce"), 1, Qt.PenStyle.DashLine)
+        plotted = [(self.reference, reference_pen), (self.points, QPen(self.color, 2))]
+        if self.reference_color is not None:
+            plotted.reverse()
+        for points, pen in plotted:
             path = QPainterPath()
+            painter.setPen(pen)
             previous = None
             for stamp, value in points:
+                if value is None:
+                    previous = None
+                    continue
                 x = rect.left() + rect.width() * (stamp-start) / max(1, end-start)
                 y = rect.bottom() - rect.height() * min(1, max(0, value / scale))
                 if previous is None or stamp - previous > 75:
                     path.moveTo(x, y)
+                    painter.drawPoint(x, y)
                 else:
                     path.lineTo(x, y)
                 previous = stamp
-            painter.setPen(pen)
             painter.drawPath(path)
 
 
@@ -233,6 +242,28 @@ def metric_cards(definitions):
         cards.append((value, chart))
         layout.addWidget(card, 0, i)
     return layout, cards
+
+
+def network_cards():
+    layout, cards = metric_cards((("Receive", COLORS[0], None), ("Send", COLORS[2], None),
+                                  ("TCP Retransmits", COLORS[3], None), ("Packet Drops", COLORS[1], None)))
+    cards[2][1].setToolTip("TCP segments retransmitted per history interval (about 15 seconds).")
+    cards[3][1].setToolTip("Packets dropped by local interfaces per history interval (about 15 seconds).")
+    return layout, cards
+
+
+def add_probe_cards(layout):
+    charts, cards = metric_cards((("Latency", COLORS[0], None), ("Probe Loss", COLORS[0], 100)))
+    for (value, chart), description in zip(cards, ("Mean round-trip time of replies in each round.",
+                                                   "Percentage of three ping requests without a reply.")):
+        value.setStyleSheet("color:#e7edf7; font-size:20px")
+        chart.reference_color = QColor(COLORS[3])
+        chart.setToolTip(description + " Router (solid blue) and internet (dashed orange).")
+    layout.addLayout(charts)
+    caption = label("Router (solid blue)  •  Internet (dashed orange)  •  Collecting probe history…", "muted")
+    caption.setWordWrap(True)
+    layout.addWidget(caption)
+    return cards, caption
 
 
 class Window(QMainWindow):
@@ -295,16 +326,22 @@ class Window(QMainWindow):
         self.timer.start()
         self.refresh()
 
-    def add_page(self, name):
+    def add_page(self, name, scrollable=False):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 12, 0, 0)
         layout.setSpacing(9)
-        self.tabs.addTab(page, name)
+        if scrollable:
+            page.setObjectName("scrollBody")
+            scroll = QScrollArea(widgetResizable=True)
+            scroll.setWidget(page)
+            self.tabs.addTab(scroll, name)
+        else:
+            self.tabs.addTab(page, name)
         return layout
 
     def overview(self):
-        layout = self.add_page("Overview")
+        layout = self.add_page("Overview", scrollable=True)
         toolbar = QHBoxLayout()
         toolbar.addWidget(label("System activity", "section"))
         toolbar.addStretch()
@@ -336,6 +373,13 @@ class Window(QMainWindow):
         self.gpu_cards[2][0].setStyleSheet(f"color:{COLORS[2]}; font-size:21px")
         self.gpu_cards[2][1].setToolTip("Solid line: VRAM used. Dashed line: total VRAM.")
         layout.addLayout(cards)
+        layout.addWidget(label("Network activity", "section"))
+        cards, self.overview_network_cards = network_cards()
+        layout.addLayout(cards)
+        self.network_health_caption = label("Collecting packet drop and link loss history…", "muted")
+        self.network_health_caption.setWordWrap(True)
+        layout.addWidget(self.network_health_caption)
+        self.overview_probes, self.overview_probe_caption = add_probe_cards(layout)
         self.coverage = label("Checking available telemetry…", "muted")
         self.coverage.setWordWrap(True)
         layout.addWidget(self.coverage)
@@ -343,6 +387,7 @@ class Window(QMainWindow):
         table, self.recent = make_table(["Last seen", "Severity", "Category", "Occurrences", "Message"],
                                        {0: local_time, 1: LEVELS.get}, descending=True,
                                        widths=[130, 85, 130, 95], severity=1)
+        table.setMinimumHeight(155)
         layout.addWidget(table, 1)
         table.doubleClicked.connect(lambda _: self.tabs.setCurrentIndex(4))
 
@@ -448,7 +493,7 @@ class Window(QMainWindow):
         layout.addWidget(self.detail, 1)
 
     def traffic_page(self):
-        layout = self.add_page("Network Traffic")
+        layout = self.add_page("Network Traffic", scrollable=True)
         header = QHBoxLayout()
         header.addWidget(label("Interface activity", "section"))
         header.addStretch()
@@ -458,8 +503,25 @@ class Window(QMainWindow):
         self.traffic_range.currentIndexChanged.connect(self.refresh_traffic_history)
         header.addWidget(self.traffic_range)
         layout.addLayout(header)
-        cards, self.traffic_cards = metric_cards((("Receive", COLORS[0], None), ("Send", COLORS[2], None)))
+        cards, self.traffic_cards = network_cards()
         layout.addLayout(cards)
+        self.traffic_health_caption = label("Collecting packet drop and link loss history…", "muted")
+        self.traffic_health_caption.setWordWrap(True)
+        layout.addWidget(self.traffic_health_caption)
+        self.traffic_probes, self.traffic_probe_caption = add_probe_cards(layout)
+        targets = QHBoxLayout()
+        targets.addWidget(label("Internet probe IP", "muted"))
+        self.probe_edit = QLineEdit(probe_target(self.state))
+        self.probe_edit.setMaximumWidth(260)
+        self.probe_edit.setPlaceholderText("Disabled")
+        self.probe_edit.setToolTip("Enter an IPv4 or IPv6 address. Clear to disable the internet probe.")
+        self.probe_edit.returnPressed.connect(self.apply_probe_target)
+        targets.addWidget(self.probe_edit)
+        save_target = QPushButton("Apply target")
+        save_target.clicked.connect(self.apply_probe_target)
+        targets.addWidget(save_target)
+        targets.addStretch()
+        layout.addLayout(targets)
         self.traffic_status = label("Waiting for socket data…", "muted")
         self.traffic_status.setWordWrap(True)
         layout.addWidget(self.traffic_status)
@@ -494,10 +556,8 @@ class Window(QMainWindow):
             ["Last seen", "Remote IP", "Port", "Country", "Process", "Protocol", "Sent", "Received", "Flag", "First seen"],
             {0: local_time, 3: country_name, 6: size, 7: size, 9: local_time}, descending=True,
             widths=[125, 147, 55, 150, 125, 73, 82, 82, 82, 125])
-        if WINDOWS:
-            view.hideColumn(6)
-            view.hideColumn(7)
         self.peer_table = view
+        view.setMinimumHeight(200)
         view.selectionModel().currentRowChanged.connect(lambda current, _: self.peer_detail(current))
         layout.addWidget(view, 1)
         self.peer_hint = ("Select a peer for socket details. Traffic totals are in the interface charts." if WINDOWS else
@@ -523,22 +583,93 @@ class Window(QMainWindow):
         self.show_traffic()
         self.status.setText("Country watchlist saved")
 
+    def apply_probe_target(self):
+        try:
+            target = save_probe_target(self.state, self.probe_edit.text())
+        except ValueError:
+            self.status.setText("Enter an IPv4 or IPv6 address, or leave the field blank to disable the internet probe.")
+            return
+        except OSError as error:
+            self.status.setText(f"Couldn't save the internet probe target · {error}")
+            return
+        self.probe_edit.setText(target)
+        self.refresh_traffic_history()
+
     def refresh_traffic_history(self, *_):
         self.traffic_history_tick = time.monotonic()
         cutoff = int(time.time() - self.traffic_range.currentData())
+        self.refresh_network_charts(self.traffic_cards, self.traffic_health_caption, cutoff)
+        self.refresh_probe_charts(self.traffic_probes, self.traffic_probe_caption, cutoff)
+
+    def refresh_probe_charts(self, cards, caption, cutoff):
+        readings = {"router": [], "internet": []}
         try:
             with database(True) as db:
-                rows = db.execute("SELECT ts,received,sent FROM traffic_history WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
+                rows = db.execute("SELECT ts,kind,target,latency,loss,status FROM network_probe_history "
+                                  "WHERE ts>=? ORDER BY ts", (cutoff,))
+                for row in rows:
+                    readings[row["kind"]].append(row)
         except sqlite3.Error:
-            rows = []
-        for column, (_, chart) in enumerate(self.traffic_cards, 1):
-            chart.set_values([(row[0], row[column]) for row in rows])
+            pass
+        current = {kind: rows[-1] if rows else None for kind, rows in readings.items()}
+        configured = probe_target(self.state)
+        internet = current["internet"]
+        if internet is None or internet["target"] != configured:
+            current["internet"] = None
+        targets = []
+        for kind, title, style in (("router", "Router", "solid blue"), ("internet", "Internet", "dashed orange")):
+            row = current[kind]
+            target = row["target"] if row else configured if kind == "internet" else ""
+            status = row["status"] if row else "Waiting for samples"
+            if kind == "internet" and not configured:
+                status = "Disabled"
+            details = " · ".join(part for part in (target, status) if part)
+            targets.append(f"{title} ({style})  {details}")
+        caption.setText("  •  ".join(targets))
+        for key, (metric, chart), unit in zip(("latency", "loss"), cards, (" ms", "%")):
+            series = []
+            values = []
+            for kind, rows in readings.items():
+                row = current[kind]
+                latest = row[key] if row else None
+                values.append(f"{latest:.1f}{unit}" if latest is not None else "—")
+                series.append([(point["ts"], point[key] if row and point["target"] == row["target"] else None)
+                               for point in rows])
+            metric.setText(" / ".join(values))
+            chart.set_values(*series)
+
+    def refresh_network_charts(self, cards, caption, cutoff):
+        traffic_rows, health_rows = [], []
+        try:
+            with database(True) as db:
+                traffic_rows = db.execute("SELECT ts,received,sent FROM traffic_history "
+                                          "WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
+                health_rows = db.execute("SELECT ts,retransmits,drops,link_losses FROM network_health_history "
+                                         "WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
+        except sqlite3.Error:
+            # Older collector databases can still supply Receive and Send history.
+            pass
+        for column, (_, chart) in enumerate(cards[:2], 1):
+            chart.set_values([(row[0], row[column]) for row in traffic_rows])
+        for column, (metric, chart) in enumerate(cards[2:], 1):
+            latest = health_rows[-1][column] if health_rows else None
+            metric.setText(f"{latest:,}" if latest is not None else "—")
+            chart.set_values([(row[0], row[column]) for row in health_rows])
+        if health_rows:
+            drops = sum(row[2] for row in health_rows)
+            losses = sum(row[3] for row in health_rows)
+            caption.setText(f"Recorded in selected range  •  Packet drops {drops:,}  •  Adapter link losses {losses:,}")
+        else:
+            caption.setText("Collecting packet drop and link loss history…")
+
+    def show_interface_rates(self, cards):
+        for column, (widget, _) in enumerate(cards[:2], 2):
+            widget.setText(rate(sum(row[column] for row in self.snapshot["net"] if not is_loopback(row[0]))))
 
     def show_traffic(self, *_):
         snapshot = self.snapshot
-        if snapshot:
-            for column, (widget, _) in enumerate(self.traffic_cards, 2):
-                widget.setText(rate(sum(row[column] for row in snapshot.get("net", []) if not is_loopback(row[0]))))
+        if "net" in snapshot:
+            self.show_interface_rates(self.traffic_cards)
         info = snapshot.get("traffic", {})
         if info:
             self.traffic_status.setText(f"{info['coverage']}  •  {info['geo']}  •  {snapshot.get('scope', '')}")
@@ -675,6 +806,8 @@ class Window(QMainWindow):
             for (metric, _), value in zip(self.cards, values):
                 metric.setText(value)
             self.show_gpu_metrics()
+            if "net" in s:
+                self.show_interface_rates(self.overview_network_cards)
             unit_label = "services" if WINDOWS else "systemd units"
             self.subtitle.setText(f"{len(s['processes'])} processes  •  {len(s['services'])} {unit_label}  •  {len(s['disk'])} drives")
             self.uptime.setText(f"Uptime {duration(s['uptime'])}")
@@ -703,6 +836,8 @@ class Window(QMainWindow):
         for column, (_, chart) in enumerate(self.cards, 1):
             chart.set_values([(row[0], row[column]) for row in rows])
         self.refresh_gpu_history(cutoff)
+        self.refresh_network_charts(self.overview_network_cards, self.network_health_caption, cutoff)
+        self.refresh_probe_charts(self.overview_probes, self.overview_probe_caption, cutoff)
 
     def show_gpu_metrics(self):
         gpus = self.snapshot.get("gpu", [])

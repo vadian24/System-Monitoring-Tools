@@ -19,9 +19,35 @@ if WINDOWS:
     except ImportError:
         maxminddb = None
 
+DEFAULT_PROBE_TARGET = "1.1.1.1"
 DEFAULT_WATCH = frozenset({"KR", "KP"})
 COUNTRY_CODE = re.compile(r"[A-Z]{2}")
 OWNER = re.compile(r'"([^"]+)",pid=(\d+)')
+
+
+def validate_probe_target(text):
+    if not text:
+        return ""
+    address = ipaddress.ip_address(text)
+    if address.is_unspecified or address.is_multicast or address.is_link_local or "%" in text:
+        raise ValueError("Enter a unicast IPv4 or IPv6 address, or leave it blank to disable the internet probe.")
+    return str(address)
+
+
+def probe_target(state):
+    try:
+        return validate_probe_target((state / "probe-target").read_text().strip())
+    except (OSError, ValueError):
+        return DEFAULT_PROBE_TARGET
+
+
+def save_probe_target(state, text):
+    target = validate_probe_target(text.strip())
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = state / f".probe-target-{os.getpid()}.tmp"
+    temporary.write_text(target + "\n", encoding="utf-8")
+    temporary.replace(state / "probe-target")
+    return target
 
 
 def watch_codes(value):

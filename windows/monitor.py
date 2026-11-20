@@ -90,6 +90,13 @@ def initialize(db):
         CREATE TABLE IF NOT EXISTS traffic_history (
             ts INTEGER PRIMARY KEY, received REAL NOT NULL, sent REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS network_health_history (
+            ts INTEGER PRIMARY KEY, retransmits INTEGER, drops INTEGER NOT NULL, link_losses INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS network_probe_history (
+            ts INTEGER NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL,
+            latency REAL, loss REAL, status TEXT NOT NULL, PRIMARY KEY(ts, kind)
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS network_peers (
             protocol TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, process TEXT NOT NULL,
             country TEXT NOT NULL, pids TEXT NOT NULL, states TEXT NOT NULL,
@@ -124,6 +131,36 @@ def lock_collector(lock):
 
 def is_loopback(name):
     return name == "lo" or (WINDOWS and "loopback" in name.casefold())
+
+
+class NetworkHealth:
+    def __init__(self):
+        self.tcp = {}
+        self.links = {}
+
+    def sample(self, interfaces, previous, links, gap):
+        tcp = windows_platform.tcp_retransmit_counts() if WINDOWS else {}
+        deltas = [value - self.tcp[family] for family, value in tcp.items()
+                  if family in self.tcp and value >= self.tcp[family]]
+        retransmits = sum(deltas) if deltas and not gap else None
+        self.tcp = tcp
+        events = []
+        drops = link_losses = 0
+        if not gap:
+            for name, current in interfaces.items():
+                if is_loopback(name) or name not in previous:
+                    continue
+                old = previous[name]
+                count = max(0, current.dropin - old.dropin) + max(0, current.dropout - old.dropout)
+                drops += count
+                if count:
+                    events.append((4, "Network", name, "Interface reported packet drops."))
+            for name, link in links.items():
+                if not is_loopback(name) and not link.isup and self.links.get(name):
+                    link_losses += 1
+                    events.append((4, "Network", name, "Network adapter link went down."))
+        self.links = {name: link.isup for name, link in links.items()}
+        return (retransmits, drops, link_losses), events
 
 
 def record(db, when, severity, category, source, message):
@@ -394,8 +431,10 @@ def windows_inventory_worker(sampler):
 class Sampler:
     def __init__(self):
         self.last = time.monotonic()
+        self.last_wall = time.time()
         self.disk = psutil.disk_io_counters(perdisk=True, nowrap=False) or {}
         self.net = psutil.net_io_counters(pernic=True, nowrap=False) or {}
+        self.network_health = NetworkHealth()
         self.psi = {}
         self.proc_io = {}
         self.inventory = []
@@ -415,6 +454,9 @@ class Sampler:
         elapsed = max(0.01, tick - self.last)
         gap = elapsed > 10
         self.last = tick
+        wall = time.time()
+        network_gap = gap or abs(wall - self.last_wall) > 10
+        self.last_wall = wall
         cpu = psutil.cpu_percent()
         cores = psutil.cpu_percent(percpu=True)
         memory, swap = psutil.virtual_memory(), psutil.swap_memory()
@@ -444,6 +486,7 @@ class Sampler:
             links = psutil.net_if_stats() if WINDOWS else {}
         except OSError:
             links = {}
+        network_health, network_events = self.network_health.sample(net, self.net, links, network_gap)
         for name, current in sorted(net.items()):
             old = self.net.get(name, current)
             if WINDOWS:
@@ -511,7 +554,8 @@ class Sampler:
                     inventory=hardware if WINDOWS else self.inventory,
                     mounts=self.mounts, fans=fans,
                     temperatures=temperatures, services=self.services, system_status=self.system_status,
-                    user_status=self.user_status, uptime=max(0, time.time()-psutil.boot_time())), changed, gap
+                    user_status=self.user_status, uptime=max(0, time.time()-psutil.boot_time()),
+                    network_health=network_health), changed + network_events, gap
 
 
 def collector():
@@ -531,8 +575,36 @@ def collector():
             else:
                 journal = threading.Thread(target=journal_worker, name="journal", daemon=True)
             journal.start()
-            run_samples(db)
-            journal.join(timeout=7)
+            probes = None
+            if WINDOWS:
+                probes = threading.Thread(target=probe_worker, name="network-probes", daemon=True)
+                probes.start()
+            try:
+                run_samples(db)
+            finally:
+                STOP.set()
+                journal.join(timeout=7)
+                if probes is not None:
+                    probes.join(timeout=7)
+
+
+def probe_worker():
+    with database() as db:
+        while not STOP.is_set():
+            start = time.monotonic()
+            wall = time.time()
+            rows = list(windows_platform.connectivity_samples(STATE))
+            elapsed = time.monotonic() - start
+            if abs(time.time() - wall) < 15 and not STOP.is_set():
+                stamp = int(time.time())
+                try:
+                    with db:
+                        db.executemany("INSERT OR REPLACE INTO network_probe_history VALUES(?,?,?,?,?,?)",
+                                       [(stamp, *row) for row in rows])
+                except sqlite3.Error as error:
+                    if sys.stderr:
+                        print(f"Network probe history write failed: {error}", file=sys.stderr, flush=True)
+            STOP.wait(max(0, 15 - elapsed))
 
 
 def store_peers(db, now, rows):
@@ -565,6 +637,8 @@ def run_samples(db):
     last_error = None
     traffic_totals = [0.0, 0.0]
     traffic_seconds = 0.0
+    retransmit_total = None
+    drop_total = link_total = 0
     previous_tick = time.monotonic()
     while not STOP.is_set():
         tick = time.monotonic()
@@ -579,6 +653,11 @@ def run_samples(db):
                 traffic_seconds += span
             previous_tick = tick
             snapshot["traffic"] = {key: value for key, value in traffic.items() if key != "peers"}
+            retransmits, drops, link_losses = snapshot["network_health"]
+            if retransmits is not None:
+                retransmit_total = (retransmit_total or 0) + retransmits
+            drop_total += drops
+            link_total += link_losses
             tests = [
                 ("I/O stall", snapshot["pressure"].get("io.full", 0) >= 5, 3, "Storage",
                  "All non-idle tasks were stalled on I/O for at least 5% of three consecutive samples."),
@@ -629,13 +708,19 @@ def run_samples(db):
                                    [(int(now), slot, row[0], *row[2:]) for slot, row in enumerate(snapshot["gpu"])])
                     db.execute("INSERT OR REPLACE INTO traffic_history VALUES(?,?,?)",
                                (int(now), *(total / traffic_seconds if traffic_seconds else 0 for total in traffic_totals)))
+                    db.execute("INSERT OR REPLACE INTO network_health_history VALUES(?,?,?,?)",
+                               (int(now), retransmit_total, drop_total, link_total))
                     traffic_totals = [0.0, 0.0]
                     traffic_seconds = 0.0
+                    retransmit_total = None
+                    drop_total = link_total = 0
                     next_sample = tick + 15
                 if tick >= next_cleanup:
                     db.execute("DELETE FROM samples WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM gpu_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM traffic_history WHERE ts < ?", (now-7*86400,))
+                    db.execute("DELETE FROM network_health_history WHERE ts < ?", (now-7*86400,))
+                    db.execute("DELETE FROM network_probe_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM network_peers WHERE last < ?", (now-7*86400,))
                     db.execute("DELETE FROM network_peers WHERE rowid IN (SELECT rowid FROM network_peers ORDER BY last DESC LIMIT -1 OFFSET 25000)")
                     db.execute("DELETE FROM events WHERE last < ?", (now-30*86400,))

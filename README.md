@@ -21,7 +21,7 @@ This walkthrough shows the Nobara Linux dashboard, including live GPU charts, sy
 2. Setup reuses a compatible Python installation or downloads and verifies Python from python.org. It installs the dashboard for your account, creates a Start menu shortcut, and starts the background collector at sign-in.
 3. To open the dashboard again, search Start for **System Monitor for Windows**.
 
-The installer is unsigned and may show a Windows SmartScreen warning. The Windows monitor was tested in a Windows VM. The [manual Windows package](downloads/System-Monitor-Windows.zip?raw=true) is also available for users who already have Python.
+The installer is unsigned and may show a Windows SmartScreen warning. The earlier Windows monitor was tested in a Windows VM. When upgrading, close the old dashboard before setup. If the old collector was running, sign out and back in to restart it. The [manual Windows package](downloads/System-Monitor-Windows.zip?raw=true) is also available for users who already have Python.
 
 ## Linux
 
@@ -32,6 +32,8 @@ The installer is unsigned and may show a Windows SmartScreen warning. The Window
 The [Linux guide](linux/README.md) lists dependencies and explains the user service.
 
 ## Network activity and log access
+
+Both editions show Receive, Send, Packet Drops, and separate router and internet Latency and Probe Loss charts in Overview and Network Traffic. Linux graphs TCP retransmission timeouts. Windows graphs TCP segments retransmitted. Router probes use the IPv4 default gateway. You can change or disable the default internet probe (`1.1.1.1`) in Network Traffic.
 
 Both editions show observed remote sockets and associated processes where the operating system provides access. The optional country watchlist uses a local GeoLite2 Country database. Country matches are leads for investigation, since VPNs and hosting services can affect the visible peer address. Windows shows interface traffic totals and peer history. Linux can also show per-peer TCP byte counts when available.
 
@@ -46,3 +48,4 @@ bash windows/installer/build.sh
 The output is `windows/installer/.build/SystemMonitorSetup.exe`. Set `LLVM_BIN` to the LLVM binaries directory if those commands are outside your `PATH`.
 
 [SHA-256 checksums for downloads](downloads/SHA256SUMS)
+

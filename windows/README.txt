@@ -12,6 +12,10 @@ Install
    opens the dashboard.
 4. To open it again, search Start for System Monitor for Windows.
 
+When upgrading, close the old dashboard before running setup. If the old
+collector was running in the background, sign out and back in after setup
+to restart it. Existing history is kept.
+
 Administrator rights are not required. The installer adds a background
 collector to your Windows Startup folder. It runs at sign-in and keeps
 recording after you close the dashboard. To install without a sign-in
@@ -23,6 +27,7 @@ What the dashboard shows
 ------------------------
 - Overview: live CPU, RAM, disk reads and writes, and NVIDIA GPU utilization,
   temperature, VRAM used and capacity, and power when nvidia-smi is available.
+  Network charts appear below GPU activity.
 - Processes: CPU, memory, and total process write I/O where permitted. On
   Windows this process counter can include non-disk I/O.
 - Services: Windows Service Control Manager entries and running, stopped,
@@ -34,10 +39,28 @@ What the dashboard shows
 - Events: recent critical, error and warning entries from the System and
   Application Event Logs, plus selected sleep and wake events and alerts from
   the monitor. Search/filter by message or source and export matching CSV.
-- Network Traffic: interface send and receive charts, observed TCP/connected
+- Network Traffic: the same network charts as Overview, observed TCP/connected
   UDP peers, process attribution where available, and a country watchlist.
   Very short connections may fall between samples. Windows per-peer byte
   counts are not collected. Network history includes up to seven days.
+
+Network charts
+--------------
+Receive and Send are rates across non-loopback interfaces. TCP Retransmits
+counts TCP segments retransmitted on Windows, including retransmissions
+that occurred before a timer expired. Packet Drops counts packets discarded
+by local interfaces. The charts show counts per history interval, and
+interface packet drops and link-down transitions also appear under Network
+in Events. VPN and virtual adapters can count traffic at multiple layers.
+
+Latency and Probe Loss show separate router and internet readings. About
+every 15 seconds the collector sends three ICMP requests to each target.
+The router is the IPv4 default gateway. The internet target defaults to
+1.1.1.1 and follows normal system routing. Set another IP address or clear
+the field under Network Traffic to disable the internet probe. Latency is
+the mean round-trip time of replies, and Probe Loss is the percentage of
+probes that received no reply. Probe errors are shown as gaps. Some networks
+filter ICMP even when other traffic works.
 
 Country lookup
 --------------
