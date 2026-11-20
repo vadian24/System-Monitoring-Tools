@@ -2,6 +2,12 @@
 
 A local desktop monitor for Linux desktops. The dashboard refreshes roughly every two seconds. The collector records events independently of the window, so closing or pausing the display does not interrupt an installed collector.
 
+## Privacy
+
+System Monitor stores and processes your metrics, event logs, observed network connections, and settings on your device. Your monitoring data stays on your device unless you choose to share it, such as by sharing an exported log.
+
+The dashboard contacts GitHub to check for and download updates. Network Traffic sends test pings to your router and to an internet probe target, which defaults to 1.1.1.1. You can change or disable the internet probe in Network Traffic. Setup may also download software dependencies.
+
 ## Start now
 
 Extract the ZIP and open a terminal in the extracted **Nobara-System-Monitor** folder. Run:

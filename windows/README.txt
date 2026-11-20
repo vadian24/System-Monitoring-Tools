@@ -2,6 +2,18 @@ SYSTEM MONITOR FOR WINDOWS
 
 Windows 10/11 desktop edition
 
+Privacy
+-------
+System Monitor stores and processes your metrics, event logs, observed
+network connections, and settings on your device. Your monitoring data stays
+on your device unless you choose to share it, such as by sharing an exported
+log.
+
+The dashboard contacts GitHub to check for and download updates. Network
+Traffic sends test pings to your router and to an internet probe target,
+which defaults to 1.1.1.1. You can change or disable the internet probe in
+Network Traffic. Setup may also download software dependencies.
+
 Install
 -------
 1. Extract the entire ZIP to a folder.

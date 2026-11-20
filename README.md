@@ -2,6 +2,12 @@
 
 Local desktop monitors for Windows and Linux. Both versions offer a live dashboard for CPU, memory, storage, GPU metrics for detected display adapters where supported, running processes, services, system events, and network activity. History is stored on the computer running the monitor.
 
+## Privacy
+
+System Monitor stores and processes your metrics, event logs, observed network connections, and settings on your device. Your monitoring data stays on your device unless you choose to share it, such as by sharing an exported log.
+
+The dashboard contacts GitHub to check for and download updates. Network Traffic sends test pings to your router and to an internet probe target, which defaults to 1.1.1.1. You can change or disable the internet probe in Network Traffic. Setup may also download software dependencies.
+
 | Platform | Download | Source and documentation |
 | --- | --- | --- |
 | Windows 10/11, x64 | [SystemMonitorSetup.exe](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/SystemMonitorSetup.exe) | [Windows source](windows/) · [Windows guide](windows/README.txt) |
