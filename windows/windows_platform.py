@@ -62,6 +62,16 @@ foreach ($entry in @(
 ConvertTo-Json -InputObject $rows -Depth 3 -Compress
 """
 
+DISK_ACTIVITY_SCRIPT = r"""
+$rows = @(Get-CimInstance -ClassName Win32_PerfFormattedData_PerfDisk_PhysicalDisk -OperationTimeoutSec 4 |
+    ForEach-Object {
+        if ($_.Name -match '^(\d+)(\s|$)') {
+            @{ Number = [int]$Matches[1]; Idle = $_.PercentIdleTime }
+        }
+    })
+ConvertTo-Json -InputObject $rows -Compress
+"""
+
 DRIVE_INVENTORY_SCRIPT = r"""
 $rows = @{}
 try {
@@ -82,6 +92,36 @@ try {
     }
 } catch {
     if (-not $rows.Count) { throw }
+}
+$volumesByDisk = @{}
+$volumeOwners = @{}
+try {
+    Get-Partition | ForEach-Object {
+        $number = [int]$_.DiskNumber
+        if ($rows.ContainsKey($number)) {
+            $volume = $_ | Get-Volume -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($volume -and $volume.UniqueId -and $volume.Size -gt 0 -and $null -ne $volume.SizeRemaining) {
+                $key = $volume.UniqueId
+                if (-not $volumesByDisk.ContainsKey($number)) { $volumesByDisk[$number] = @{} }
+                if (-not $volumeOwners.ContainsKey($key)) { $volumeOwners[$key] = @{} }
+                $volumesByDisk[$number][$key] = $volume
+                $volumeOwners[$key][$number] = $true
+            }
+        }
+    }
+} catch {}
+foreach ($number in $volumesByDisk.Keys) {
+    $used = [uint64]0
+    $available = [uint64]0
+    $found = $false
+    foreach ($key in $volumesByDisk[$number].Keys) {
+        if ($volumeOwners[$key].Count -ne 1) { continue }
+        $volume = $volumesByDisk[$number][$key]
+        $available += $volume.SizeRemaining
+        $used += ($volume.Size - $volume.SizeRemaining)
+        $found = $true
+    }
+    if ($found) { $rows[$number].Space = @($used, $available) }
 }
 ConvertTo-Json -InputObject @($rows.Values | Sort-Object { $_.Number }) -Depth 3 -Compress
 """

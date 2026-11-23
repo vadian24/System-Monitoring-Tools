@@ -44,6 +44,18 @@ background refresh. Drive health warnings appear under Storage in Events.
 Windows storage drivers, USB bridges and permissions determine which health
 and reliability readings are available.
 
+Each drive shows its read and write rates, busy percentage, write latency,
+and a read/write history graph. Per-drive history begins with version 1.3.0.
+The selected Overview time range applies to this graph. Used and available
+space come from volumes that Windows can associate with one drive.
+
+Overview colors flag sustained conditions. CPU uses 80% and 95%, while RAM
+and VRAM use 85% and 95%. Drive busy turns yellow at 80%, or red at 95% when
+write latency is also elevated (20 ms for NVMe and SSD, 50 ms for other
+drives). GPU load turns yellow at 85% and red at 95% while thermal throttling
+is reported. Temperature uses reported device thresholds. Hover a colored
+card for its rule.
+
 Dashboard updates
 -----------------
 The dashboard checks GitHub when it opens. Use Check for updates in the
@@ -60,7 +72,7 @@ old pin opens Python, unpin that shortcut and pin the running dashboard again.
 
 What the dashboard shows
 ------------------------
-- Overview: live CPU, RAM, disk reads and writes, and GPU activity for
+- Overview: live CPU, RAM, per-drive activity, and GPU activity for
   detected display adapters, including virtual adapters. Utilization and
   dedicated memory depend on the driver. NVIDIA temperature and power are
   available when nvidia-smi exposes them. Network charts appear below GPU activity.

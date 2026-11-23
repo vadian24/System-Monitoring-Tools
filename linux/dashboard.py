@@ -1,5 +1,6 @@
 """Qt dashboard for the local system monitor."""
 import csv
+from collections import defaultdict
 from datetime import datetime, timedelta
 from functools import lru_cache
 import json
@@ -420,12 +421,60 @@ def drive_metric(title, text, state=None):
     return column
 
 
+GRAPH_STATUS = {
+    0: ("Normal", "#1b2e28", "#437964"),
+    1: ("Elevated", "#3b311c", "#ffd45b"),
+    2: ("High", "#451e2a", "#ff7888"),
+    None: ("Unavailable", "#232a36", "#434d60"),
+}
+
+
+def threshold_level(value, warning, critical=None):
+    if value is None:
+        return None
+    if critical is not None and value >= critical:
+        return 2
+    return int(warning is not None and value >= warning)
+
+
+def drive_load_level(busy, latency, kind):
+    latency_limit = 20 if kind in ("NVMe", "SSD / flash", "SSD") else 50
+    if busy is not None and busy >= 95 and latency is not None and latency >= latency_limit:
+        return 2
+    return threshold_level(busy, 80)
+
+
+def color_graph(card, level, rule):
+    status, fill, border = GRAPH_STATUS[level]
+    tooltip = f"{status} · {rule}"
+    if card.toolTip() != tooltip:
+        card.setToolTip(tooltip)
+        card.setStyleSheet(f"QFrame#card {{background:{fill}; border:1px solid {border}; border-radius:12px;}}")
+        card.setAccessibleDescription(tooltip)
+
+
+def probe_loss_level(rows, current):
+    if current is None or current["loss"] is None or time.time() - current["ts"] > 90:
+        return None
+    recent = []
+    for row in reversed(rows):
+        if (row["target"] != current["target"] or row["loss"] is None
+                or current["ts"] - row["ts"] > 90):
+            break
+        recent.append(row["loss"])
+        if len(recent) == 3:
+            return 2 if all(value >= 100 for value in recent) else int(all(value > 0 for value in recent))
+    return 0
+
+
 class Window(QMainWindow):
     def __init__(self, state, autostart, launcher):
         super().__init__()
         self.state = state
         self.launcher = launcher
         self.snapshot = {}
+        self.graph_streaks = {}
+        self.drive_activity_cards = {}
         self.settings = {}
         self.history_tick = 0
         self.traffic_history_tick = 0
@@ -520,8 +569,9 @@ class Window(QMainWindow):
         self.range.currentIndexChanged.connect(self.refresh_history)
         toolbar.addWidget(self.range)
         layout.addLayout(toolbar)
-        cards, self.cards = metric_cards(zip(
-            ("CPU utilization", "RAM in use", "Disk writes", "Full I/O pressure"), COLORS, (100, 100, None, 100)))
+        system_metrics = ("CPU utilization", "RAM in use")
+        system_metrics += ("Full I/O pressure",)
+        cards, self.cards = metric_cards(zip(system_metrics, COLORS, (100, 100, 100)))
         layout.addLayout(cards)
         self.add_drive_health(layout)
         gpu_header = QHBoxLayout()
@@ -781,6 +831,9 @@ class Window(QMainWindow):
         internet = current["internet"]
         if internet is None or internet["target"] != configured:
             current["internet"] = None
+        loss_levels = [probe_loss_level(rows, current[kind]) for kind, rows in readings.items()]
+        color_graph(cards[1][1].parentWidget(), max((level for level in loss_levels if level is not None), default=None),
+                    "Yellow after three rounds with loss. Red when one monitored target gives no replies for three rounds.")
         targets = []
         for kind, title, style in (("router", "Router", "solid blue"), ("internet", "Internet", "dashed orange")):
             row = current[kind]
@@ -820,6 +873,10 @@ class Window(QMainWindow):
             latest = health_rows[-1][column] if health_rows else None
             metric.setText(f"{latest:,}" if latest is not None else "—")
             chart.set_values([(row[0], row[column]) for row in health_rows])
+            recent = [row[column] for row in health_rows[-3:] if time.time() - row[0] <= 60]
+            level = (int(len(recent) == 3 and all(value is not None and value > 0 for value in recent))
+                     if recent and recent[-1] is not None else None)
+            color_graph(chart.parentWidget(), level, "Yellow when this counter rises in three saved intervals.")
         if health_rows:
             drops = sum(row[2] for row in health_rows)
             losses = sum(row[3] for row in health_rows)
@@ -988,11 +1045,61 @@ class Window(QMainWindow):
         if self.drive_caption.text() == "Drive health check requested.":
             self.drive_caption.setText("Drive health refresh runs in the background.")
 
+    def graph_level(self, key, proposed):
+        stamp = self.snapshot.get("ts", 0)
+        if proposed is None or not -5 <= time.time() - stamp <= 12:
+            self.graph_streaks.pop(key, None)
+            return None
+        last, levels = self.graph_streaks.get(key, (0, []))
+        if stamp != last:
+            if not 0 < stamp - last <= 10:
+                levels = []
+            levels = [*levels[-2:], proposed]
+            self.graph_streaks[key] = (stamp, levels)
+        return min(levels) if len(levels) == 3 else 0
+
+    def refresh_drive_activity(self):
+        data = self.snapshot.get("drive_activity", {})
+        space = self.snapshot.get("drive_space", {})
+        for key, (activity, values, _, kind) in self.drive_activity_cards.items():
+            used, available = space.get(key, (None, None))
+            read_rate, write_rate, busy, latency = data.get(key, (None, None, None, None))
+            for widget, value in zip(values, (rate(read_rate) if read_rate is not None else "—",
+                                               rate(write_rate) if write_rate is not None else "—",
+                                               percent(busy), f"{latency:.1f} ms" if latency is not None else "—",
+                                               size(used) if used is not None else "—",
+                                               size(available) if available is not None else "—")):
+                widget.setText(value)
+            latency_limit = 20 if kind in ("NVMe", "SSD / flash", "SSD") else 50
+            color_graph(activity, self.graph_level(("disk", key), drive_load_level(busy, latency, kind)),
+                        f"Yellow at 80% busy. Red at 95% busy with write latency of at least {latency_limit} ms.")
+            card = activity.parentWidget()
+            card.setMinimumHeight(card.minimumSizeHint().height())
+
+    def refresh_drive_activity_history(self, cutoff):
+        readings = defaultdict(list)
+        try:
+            with database(True) as db:
+                for stamp, key, reads, writes in db.execute(
+                        "SELECT ts,device,read_rate,write_rate FROM drive_activity_history WHERE ts>=? ORDER BY ts", (cutoff,)):
+                    if key in self.drive_activity_cards:
+                        readings[key].append((stamp, reads, writes))
+        except sqlite3.Error:
+            pass
+        for key, (_, _, graph, _) in self.drive_activity_cards.items():
+            graph.set_values([(stamp, reads) for stamp, reads, _ in readings[key]],
+                             [(stamp, writes) for stamp, _, writes in readings[key]])
+
     def show_drive_health(self):
         rows = self.snapshot.get("drive_health")
         if rows == getattr(self, "visible_drive_health", None):
             return
         self.visible_drive_health = rows
+        self.drive_activity_cards.clear()
+        active = {("disk", drive["id"]) for drive in rows or []}
+        for key in self.graph_streaks.keys() - active:
+            if isinstance(key, tuple) and key[0] == "disk":
+                del self.graph_streaks[key]
         while self.drive_cards.count():
             self.drive_cards.takeAt(0).widget().deleteLater()
         self.drive_caption.setText("Select a drive for readings and next steps." if rows else
@@ -1040,11 +1147,39 @@ class Window(QMainWindow):
             metrics.addLayout(drive_metric("Temp", temperature), 1)
             metrics.addLayout(drive_metric(sector_title, sector, sector_state), 1)
             contents.addLayout(metrics)
+            activity = QFrame(objectName="card")
+            details = QVBoxLayout(activity)
+            details.setContentsMargins(9, 7, 9, 6)
+            details.addWidget(label("Activity", "metricTitle"))
+            live = QGridLayout()
+            values = []
+            for column, name in enumerate(("Read", "Write", "Busy", "Write latency")):
+                live.addWidget(label(name, "muted"), 0, column)
+                value = label("—")
+                live.addWidget(value, 1, column)
+                values.append(value)
+            for column, name in ((0, "Used"), (2, "Available")):
+                field = label(name, "muted")
+                field.setToolTip("Total across readable filesystems on this drive.")
+                live.addWidget(field, 2, column, 1, 2)
+                value = label("—")
+                live.addWidget(value, 3, column, 1, 2)
+                values.append(value)
+            details.addLayout(live)
+            graph = Spark(COLORS[0])
+            graph.reference_color = QColor(COLORS[3])
+            graph.setToolTip("Read throughput in solid blue. Write throughput in dashed orange.")
+            details.addWidget(graph)
+            activity.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            contents.addWidget(activity)
+            self.drive_activity_cards[drive["id"]] = activity, values, graph, drive["kind"]
             card.setMinimumHeight(contents.minimumSize().height())
             for child in card.findChildren(QLabel):
                 child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             card.clicked.connect(lambda checked=False, selected=drive: self.show_drive_details(selected))
             self.drive_cards.addWidget(card, index // 2, index % 2)
+        if self.drive_activity_cards:
+            self.refresh_drive_activity_history(int(time.time() - self.range.currentData()))
 
     def show_drive_details(self, drive):
         checked = local_time(drive["checked"]) if drive["checked"] else "No successful check"
@@ -1067,16 +1202,15 @@ class Window(QMainWindow):
 
     def show_overview(self):
         self.show_drive_health()
+        self.refresh_drive_activity()
         s = self.snapshot
         if s:
-            values = [
-                percent(s.get("cpu")),
-                percent(s.get("memory")),
-                rate(sum(row[3] for row in s.get("disk", []))),
-                percent(s.get("pressure", {}).get("io.full")),
-            ]
-            for (metric, _), value in zip(self.cards, values):
-                metric.setText(value)
+            readings = ((s.get("cpu"), 80, 95), (s.get("memory"), 85, 95),
+                        (s.get("pressure", {}).get("io.full"), 5, 50))
+            for key, (metric, chart), (value, warning, critical) in zip(("cpu", "memory", "io"), self.cards, readings):
+                metric.setText(percent(value))
+                level = self.graph_level(key, threshold_level(value, warning, critical))
+                color_graph(chart.parentWidget(), level, f"Yellow at {warning}%. Red at {critical}%.")
             self.show_gpu_metrics()
             if "net" in s:
                 self.show_interface_rates(self.overview_network_cards)
@@ -1099,11 +1233,12 @@ class Window(QMainWindow):
         cutoff = int(time.time() - self.range.currentData())
         try:
             with database(True) as db:
-                rows = db.execute("SELECT ts,cpu,memory,disk_write,io_full FROM samples WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
+                rows = db.execute("SELECT ts,cpu,memory,io_full FROM samples WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
         except sqlite3.Error:
             rows = []
         for column, (_, chart) in enumerate(self.cards, 1):
             chart.set_values([(row[0], row[column]) for row in rows])
+        self.refresh_drive_activity_history(cutoff)
         self.refresh_gpu_history(cutoff)
         self.refresh_network_charts(self.overview_network_cards, self.network_health_caption, cutoff)
         self.refresh_probe_charts(self.overview_probes, self.overview_probe_caption, cutoff)
@@ -1132,6 +1267,23 @@ class Window(QMainWindow):
             values = ("—",) * 4
         for (widget, _), value in zip(self.gpu_cards, values):
             widget.setText(value)
+        gpu_name = metric[0] if metric else ""
+        if gpu_name != getattr(self, "colored_gpu", None):
+            for key in ("gpu-load", "gpu-temp", "gpu-vram"):
+                self.graph_streaks.pop(key, None)
+            self.colored_gpu = gpu_name
+        warning, critical, throttling = self.snapshot.get("gpu_thermal", {}).get(gpu_name, (None, None, None))
+        load, temp, used, capacity = metric[2:6] if metric else (None, None, None, None)
+        load_level = 2 if load is not None and load >= 95 and throttling else threshold_level(load, 85)
+        temp_level = 2 if throttling else (threshold_level(temp, warning, critical)
+                                           if warning is not None or critical is not None else None)
+        vram_level = threshold_level(used / capacity * 100 if used is not None and capacity else None, 85, 95)
+        for key, (_, chart), level, rule in zip(("gpu-load", "gpu-temp", "gpu-vram"), self.gpu_cards,
+                                              (load_level, temp_level, vram_level), (
+            "Yellow at 85%. Red at 95% with thermal throttling.",
+            "Uses device warning and critical temperature limits or thermal throttling when reported.",
+            "Yellow at 85% of VRAM. Red at 95% of VRAM.")):
+            color_graph(chart.parentWidget(), self.graph_level(key, level), rule)
         if not metric:
             status = "Waiting for a display adapter"
         elif metric[2] is None:

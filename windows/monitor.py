@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 
 import psutil
 
@@ -80,6 +81,11 @@ def initialize(db):
             ts INTEGER PRIMARY KEY, cpu REAL, memory REAL, io_full REAL,
             disk_write REAL, network REAL, disk_read REAL
         );
+        CREATE TABLE IF NOT EXISTS drive_activity_history (
+            ts INTEGER NOT NULL, device TEXT NOT NULL, read_rate REAL, write_rate REAL,
+            PRIMARY KEY(ts, device)
+        );
+        CREATE INDEX IF NOT EXISTS drive_activity_device_time ON drive_activity_history(device, ts);
         CREATE TABLE IF NOT EXISTS gpu_history (
             ts INTEGER NOT NULL, slot INTEGER NOT NULL, name TEXT NOT NULL,
             utilization REAL, temperature REAL, vram_used REAL, vram_total REAL, power REAL,
@@ -416,6 +422,43 @@ def windows_inventory_worker(sampler):
         STOP.wait(90)
 
 
+def nvidia_thermal(executable):
+    raw, status, _ = command([executable, "-q", "-x"])
+    if status:
+        return {}
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return {}
+    results = {}
+    for gpu in root.findall("gpu"):
+        name = gpu.findtext("product_name")
+        pci = gpu.findtext("pci/pci_bus_id") or gpu.get("id")
+        if not name:
+            continue
+        def threshold(key):
+            value = gpu.findtext(f"temperature/{key}", "").split()
+            return int(value[0]) if value and value[0].isdigit() and int(value[0]) <= 150 else None
+        reasons = gpu.find("clocks_event_reasons")
+        if reasons is None:
+            reasons = gpu.find("clocks_throttle_reasons")
+        throttling = None
+        if reasons is not None:
+            thermal = [e.text for e in reasons if e.tag.endswith("thermal_slowdown") and e.text in ("Active", "Not Active")]
+            throttling = "Active" in thermal if thermal else None
+        data = (threshold("gpu_temp_max_gpu_threshold"), threshold("gpu_temp_slow_threshold"), throttling)
+        results[pci[-12:].lower() if pci else name] = (name, data)
+    return results
+
+
+def windows_disk_worker(sampler):
+    while not STOP.is_set():
+        rows, _ = windows_platform.powershell_json(windows_platform.DISK_ACTIVITY_SCRIPT, timeout=8)
+        sampler.windows_disk_busy = {f"PhysicalDrive{row['Number']}": max(0, min(100, 100 - row["Idle"]))
+                                     for row in rows or [] if row.get("Idle") is not None}
+        STOP.wait(4)
+
+
 def windows_gpu_worker(sampler):
     adapters = []
     next_inventory = 0
@@ -429,7 +472,15 @@ def windows_gpu_worker(sampler):
         extra, _ = gpu()
         rows = windows_platform.gpu_rows(adapters, controllers, counters, extra)
         status = "Display adapters detected. Readings depend on the Windows graphics driver." if rows else "No display adapters detected"
-        sampler.windows_gpu = rows, status
+        executable = windows_platform.nvidia_tool() if extra else None
+        sensors = list(nvidia_thermal(executable).values()) if executable else []
+        thermal = {}
+        for row in rows:
+            name = row[0].casefold().removeprefix("nvidia ")
+            matches = [data for adapter, data in sensors if adapter.casefold().removeprefix("nvidia ") == name]
+            if len(matches) == 1:
+                thermal[row[0]] = matches[0]
+        sampler.windows_gpu = rows, thermal, status
         STOP.wait(4)
 
 
@@ -450,9 +501,11 @@ class Sampler:
         self.next_inventory = self.next_services = 0
         self.windows_inventory = ([("System", "Hardware inventory", "Waiting for Windows hardware information")], [], {})
         self.windows_video_controllers = []
-        self.windows_gpu = [], "Checking display adapters"
+        self.windows_disk_busy = {}
+        self.windows_gpu = [], {}, "Checking display adapters"
         if WINDOWS:
             threading.Thread(target=windows_inventory_worker, args=(self,), name="inventory", daemon=True).start()
+            threading.Thread(target=windows_disk_worker, args=(self,), name="disk-activity", daemon=True).start()
             threading.Thread(target=windows_gpu_worker, args=(self,), name="graphics", daemon=True).start()
         psutil.cpu_percent()
         psutil.cpu_percent(percpu=True)
@@ -483,6 +536,8 @@ class Sampler:
             current, old = disk[name], self.disk.get(name, disk[name])
             writes = max(0, current.write_count - old.write_count)
             busy = min(100, max(0, current.busy_time-old.busy_time)/elapsed/10) if hasattr(current, "busy_time") else None
+            if WINDOWS and busy is None:
+                busy = self.windows_disk_busy.get(name)
             drives.append([name, model,
                            max(0, current.read_bytes-old.read_bytes)/elapsed,
                            max(0, current.write_bytes-old.write_bytes)/elapsed,
@@ -555,10 +610,14 @@ class Sampler:
                                         f"{key[0]} unit changed state from {old} to {active}."))
             self.known_services.update(current_services)
             self.next_services = tick + 12
-        gpus, gpu_status = self.windows_gpu if WINDOWS else gpu()
+        if WINDOWS:
+            gpus, gpu_thermal, gpu_status = self.windows_gpu
+        else:
+            gpus, gpu_status = gpu()
+            gpu_thermal = {}
         return dict(ts=time.time(), cpu=cpu, cores=cores, memory=memory.percent, ram_used=memory.total-memory.available,
                     ram_total=memory.total, swap=swap.percent, pressure=psi, disk=drives, net=interfaces, gpu=gpus,
-                    gpu_status=gpu_status, drm=displays if WINDOWS else drm_metrics(), processes=processes,
+                    gpu_status=gpu_status, gpu_thermal=gpu_thermal, drm=displays if WINDOWS else drm_metrics(), processes=processes,
                     inventory=hardware if WINDOWS else self.inventory,
                     mounts=self.mounts, fans=fans,
                     temperatures=temperatures, services=self.services, system_status=self.system_status,
@@ -671,7 +730,9 @@ def drive_health_worker(sampler):
             if inventory is not None:
                 refresh = tick >= deadline or request != observed_request
                 results = {}
+                sampler.drive_space = {drive["id"]: drive["space"] for drive in inventory if drive.get("space") is not None}
                 for drive in inventory:
+                    drive = {key: value for key, value in drive.items() if key != "space"}
                     if STOP.is_set():
                         return
                     old = previous.get(drive["id"])
@@ -715,7 +776,7 @@ def drive_inventory():
              "number": row["Number"], "device": f"Disk {row['Number']}",
              "name": row.get("Name") or f"Disk {row['Number']}",
              "kind": row.get("Bus") or "Storage", "storage": row.get("Storage"),
-             "windows_health": row.get("Health")} for row in data]
+             "windows_health": row.get("Health"), "space": row.get("Space")} for row in data]
 
 
 def read_drive_health(drive, previous):
@@ -754,9 +815,30 @@ def read_drive_health(drive, previous):
     return drive_result(drive, readings, issues, status=status, note=note)
 
 
+def drive_activity_rows(health, disks):
+    counters = {row[0]: row for row in disks}
+    activity = {}
+    for drive in health:
+        names = [Path(drive["device"]).name]
+        if drive.get("number") is not None:
+            names = [f'PhysicalDrive{drive["number"]}']
+        elif drive["kind"] == "NVMe":
+            controller = re.fullmatch(r"(nvme\d+)n\d+", names[0])
+            if controller:
+                names = [name for name in counters if re.fullmatch(controller[1] + r"n\d+", name)]
+        rows = [counters[name] for name in names if name in counters]
+        if rows:
+            activity[drive["id"]] = (
+                sum(row[2] for row in rows), sum(row[3] for row in rows),
+                max((row[4] for row in rows if row[4] is not None), default=None),
+                max((row[5] for row in rows if row[5] is not None), default=None))
+    return activity
+
+
 def run_samples(db, token=None):
     sampler = Sampler()
     sampler.drive_health = None
+    sampler.drive_space = {}
     threading.Thread(target=drive_health_worker, args=(sampler,), name="drive-health", daemon=True).start()
     last_drive_alerts = {}
     network = NetworkSampler(STATE, command)
@@ -773,6 +855,8 @@ def run_samples(db, token=None):
         try:
             snapshot, events, gap = sampler.sample()
             snapshot["drive_health"] = sampler.drive_health
+            snapshot["drive_space"] = sampler.drive_space
+            snapshot["drive_activity"] = drive_activity_rows(sampler.drive_health or [], snapshot["disk"])
             events.extend(drive_health_events(sampler.drive_health or [], last_drive_alerts))
             traffic = network.sample()
             now = snapshot["ts"]
@@ -829,6 +913,8 @@ def run_samples(db, token=None):
                 for event in events:
                     record(db, now, *event)
                 if tick >= next_sample:
+                    db.executemany("INSERT OR REPLACE INTO drive_activity_history VALUES(?,?,?,?)",
+                                   [(int(now), key, *data[:2]) for key, data in snapshot["drive_activity"].items()])
                     db.execute("INSERT OR REPLACE INTO samples(ts,cpu,memory,io_full,disk_write,network,disk_read) VALUES(?,?,?,?,?,?,?)",
                                (int(now), snapshot["cpu"], snapshot["memory"], snapshot["pressure"].get("io.full"),
                                 sum(row[3] for row in snapshot["disk"]),
@@ -846,6 +932,7 @@ def run_samples(db, token=None):
                     drop_total = link_total = 0
                     next_sample = tick + 15
                 if tick >= next_cleanup:
+                    db.execute("DELETE FROM drive_activity_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM samples WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM gpu_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM traffic_history WHERE ts < ?", (now-7*86400,))

@@ -31,7 +31,7 @@ Open **Linux System Monitor** from your application launcher. The installer uses
 
 ## What you can see
 
-- **Overview** shows CPU, RAM, storage writes, I/O pressure, recent faults, and up to seven days of activity charts. GPU charts below System Activity show utilization, temperature, VRAM used (solid) and total (dashed), and power draw. GPU history starts once this version of the collector runs.
+- **Overview** shows CPU, RAM, system-wide full I/O pressure, recent faults, and up to seven days of activity charts. GPU charts below System Activity show utilization, temperature, VRAM used (solid) and total (dashed), and power draw. GPU history starts once this version of the collector runs.
 - **Processes** lists visible PIDs, user, CPU, memory, disk writes where the OS permits per-process I/O access, and process state. CPU can exceed 100% when multiple cores are in use.
 - **Services** shows loaded systemd system and user services, sockets and timers, including inactive and failed units. The collector logs observed transitions into and out of failed state.
 - **Hardware** shows CPU cores, PCI and USB devices, motherboard and BIOS data, storage and filesystem utilization, disk throughput and latency, network interfaces, and exported temperatures and fan speeds. GPU readings come from Linux DRM, driver sensors and, for NVIDIA, `nvidia-smi` when available. A display adapter can appear even when its driver does not expose live counters or sensors. Device inventory is refreshed about every 45 seconds.
@@ -42,6 +42,10 @@ Open **Linux System Monitor** from your application launcher. The installer uses
 Overview detects connected drives and lists one card per drive with its name, type, health check, temperature, and sector or media status. Select a card to see the last check, readings, and suggested steps for any warning. Cards turn yellow or red for warnings or critical conditions. **Check now** requests a background refresh. New health warnings are recorded in Events under Storage.
 
 Linux reads SMART through UDisks when available and can fall back to smartmontools for directly accessible drives. Supported sleeping HDDs are left asleep. USB flash drives and some enclosures may expose no SMART data. Permissions and controller support affect available readings.
+
+Each drive also shows its read and write rates, busy percentage, write latency, and a two-line read/write history graph. Used and available space come from readable mounted filesystems. Shared filesystems spanning drives are excluded to avoid double-counting. Per-drive history begins with version 1.3.0. The selected Overview time range applies to this graph.
+
+Overview colors indicate sustained conditions. CPU turns yellow at 80% and red at 95%. RAM and VRAM use 85% and 95%. Full I/O pressure uses 5% and 50%. Drive busy turns yellow at 80%, or red at 95% when write latency is also elevated (20 ms for NVMe and SSD, 50 ms for other drives). GPU load turns yellow at 85% and red at 95% while thermal throttling is reported. Temperature uses the device's reported thresholds. Hover a colored card for its rule.
 
 ## Dashboard updates
 
