@@ -1147,6 +1147,10 @@ class Window(QMainWindow):
         for drive in rows or []:
             status = drive["status"]
             check = drive.get("health_check", status)
+            volumes = drive.get("volume_names") or []
+            title = volumes[0] if volumes else drive["name"]
+            if len(volumes) > 1:
+                title += f" (+{len(volumes) - 1})"
             readings = dict(drive["readings"])
             temperature = readings.get("Temperature", "Unavailable")
             sector_title, sector, sector_state = drive_sector_summary(readings)
@@ -1154,8 +1158,9 @@ class Window(QMainWindow):
             card = DriveCard()
             card.setCursor(Qt.CursorShape.PointingHandCursor)
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-            card.setToolTip(f'{drive["name"]} · {reason or "Open drive details"}')
-            card.setAccessibleName(f'{drive["name"]}, {drive["kind"]}. {check}. Temperature: {temperature}. {sector_title}: {sector}. {reason}')
+            identity_text = " · ".join([*volumes, drive["name"]])
+            card.setToolTip(f'{identity_text} · {reason or "Open drive details"}')
+            card.setAccessibleName(f'{identity_text}, {drive["kind"]}. {check}. Temperature: {temperature}. {sector_title}: {sector}. {reason}')
             background, border = {"Warning": ("#3b311c", "#ffd45b"),
                                   "Critical": ("#451e2a", "#ff7888")}.get(status, ("#191f2b", "#2c3546"))
             card.setStyleSheet(
@@ -1165,7 +1170,7 @@ class Window(QMainWindow):
             contents.setContentsMargins(11, 7, 11, 7)
             contents.setSpacing(5)
             header = QHBoxLayout()
-            identity = label(drive["name"], "metricTitle")
+            identity = label(title, "metricTitle")
             identity.setTextFormat(Qt.TextFormat.PlainText)
             identity.setWordWrap(True)
             header.addWidget(identity, 1)
@@ -1174,6 +1179,11 @@ class Window(QMainWindow):
             kind.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             header.addWidget(kind)
             contents.addLayout(header)
+            if volumes and volumes[0] != drive["name"]:
+                model = label(drive["name"], "muted")
+                model.setTextFormat(Qt.TextFormat.PlainText)
+                model.setWordWrap(True)
+                contents.addWidget(model)
             if reason:
                 alert = label(reason)
                 alert.setTextFormat(Qt.TextFormat.PlainText)
@@ -1233,6 +1243,8 @@ class Window(QMainWindow):
         lines = [f'{drive["name"]} · {drive["kind"]} · {drive["device"]}',
                  f'Status: {drive["status"]}', f'Health check: {drive.get("health_check", drive["status"])}',
                  f"Last check: {checked}"]
+        if drive.get("volume_names"):
+            lines.append("Volumes: " + ", ".join(drive["volume_names"]))
         if drive["note"]:
             lines += ["", drive["note"]]
         if drive["readings"]:

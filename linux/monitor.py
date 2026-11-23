@@ -733,7 +733,7 @@ def drive_health_worker(sampler):
                     if STOP.is_set():
                         return
                     old = previous.get(drive["id"])
-                    results[drive["id"]] = read_drive_health(drive, old) if refresh or old is None else old
+                    results[drive["id"]] = read_drive_health(drive, old) if refresh or old is None else {**old, **drive}
                 sampler.drive_health = list(results.values())
                 previous = results
                 if refresh:
@@ -763,7 +763,7 @@ def drive_health_events(rows, last):
     return events
 
 
-def mounted_volume_space(nodes, group, owners, volumes):
+def mounted_volume_space(nodes, group, owners, volumes, labels):
     hosts_root = False
     for node in nodes:
         identity = node.get("uuid") or node["name"]
@@ -771,17 +771,25 @@ def mounted_volume_space(nodes, group, owners, volumes):
         used, available = node.get("fsused"), node.get("fsavail")
         if used is not None and available is not None:
             volumes[identity] = (used, available)
-        child_hosts_root = mounted_volume_space(node.get("children") or [], group, owners, volumes)
-        hosts_root = hosts_root or child_hosts_root or "/" in (node.get("mountpoints") or [])
+        mountpoints = node.get("mountpoints") or []
+        name = (node.get("label") or "").strip()
+        system_partition = node.get("parttype") in (
+            "0xef", "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "de94bba4-06d1-4d40-a16a-bfd50179d6ac")
+        if name and not system_partition and node.get("fstype") != "swap" and "[SWAP]" not in mountpoints:
+            priority = 0 if any(path and path.startswith("/") and not path.startswith("/boot")
+                                for path in mountpoints) else 1
+            labels[name] = min(priority, labels.get(name, priority))
+        child_hosts_root = mounted_volume_space(node.get("children") or [], group, owners, volumes, labels)
+        hosts_root = hosts_root or child_hosts_root or "/" in mountpoints
     return hosts_root
 
 
 def drive_inventory():
-    fields = "NAME,TYPE,MODEL,TRAN,ROTA,SERIAL,UUID,FSUSED,FSAVAIL,MOUNTPOINTS"
+    fields = "NAME,TYPE,MODEL,TRAN,ROTA,SERIAL,UUID,FSUSED,FSAVAIL,MOUNTPOINTS,LABEL,FSTYPE,PARTTYPE"
     result, code, _ = command(["lsblk", "--json", "--bytes", "--output", fields])
     if code:
         return None
-    drives, owners, volumes = {}, {}, {}
+    drives, owners, volumes, labels_by_drive = {}, {}, {}, {}
     system_groups = set()
     for disk in json.loads(result).get("blockdevices", []):
         name = disk["name"]
@@ -795,9 +803,11 @@ def drive_inventory():
         kind = "NVMe" if controller else "USB" if disk.get("tran") == "usb" else "HDD" if disk.get("rota") else "SSD / flash"
         drives.setdefault(group, {"id": identity, "name": (disk.get("model") or name).strip(),
                                   "kind": kind, "device": device})
-        if mounted_volume_space([disk], group, owners, volumes):
+        if mounted_volume_space([disk], group, owners, volumes, labels_by_drive.setdefault(group, {})):
             system_groups.add(group)
     for group, drive in drives.items():
+        labels = labels_by_drive[group]
+        drive["volume_names"] = sorted(labels, key=labels.get)
         filesystems = [space for key, space in volumes.items() if owners[key] == {group}]
         if filesystems:
             drive["space"] = tuple(map(sum, zip(*filesystems)))

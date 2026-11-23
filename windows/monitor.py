@@ -736,7 +736,7 @@ def drive_health_worker(sampler):
                     if STOP.is_set():
                         return
                     old = previous.get(drive["id"])
-                    results[drive["id"]] = read_drive_health(drive, old) if refresh or old is None else old
+                    results[drive["id"]] = read_drive_health(drive, old) if refresh or old is None else {**old, **drive}
                 sampler.drive_health = list(results.values())
                 previous = results
                 if refresh:
@@ -777,7 +777,8 @@ def drive_inventory():
              "number": row["Number"], "device": f"Disk {row['Number']}",
              "name": row.get("Name") or f"Disk {row['Number']}",
              "kind": row.get("Bus") or "Storage", "storage": row.get("Storage"),
-             "windows_health": row.get("Health"), "space": row.get("Space")} for row in data]
+             "windows_health": row.get("Health"), "space": row.get("Space"),
+             "volume_names": row.get("VolumeNames") or []} for row in data]
 
 
 def read_drive_health(drive, previous):

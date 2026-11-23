@@ -95,6 +95,7 @@ try {
 }
 $volumesByDisk = @{}
 $volumeOwners = @{}
+$namesByDisk = @{}
 $systemLetter = ([string]$env:SystemDrive).TrimEnd(':')
 try {
     Get-Partition | ForEach-Object {
@@ -104,6 +105,16 @@ try {
                 $rows[$number].System = $true
             }
             $volume = $_ | Get-Volume -ErrorAction SilentlyContinue | Select-Object -First 1
+            $letter = [string]$_.DriveLetter
+            $label = ([string]$volume.FileSystemLabel).Trim()
+            if ($letter -match '^[A-Za-z]$' -or ($label -and -not $_.IsSystem -and -not $_.IsHidden)) {
+                $name = if ($letter -match '^[A-Za-z]$') {
+                    if ($label) { "$label (${letter}:)" } else { "${letter}:" }
+                } else { $label }
+                if (-not $namesByDisk.ContainsKey($number)) { $namesByDisk[$number] = @() }
+                $namesByDisk[$number] += @{ Name = $name; Order = if ($letter -eq $systemLetter) { 0 }
+                    elseif ($letter -match '^[A-Za-z]$') { 1 } else { 2 } }
+            }
             if ($volume -and $volume.UniqueId -and $volume.Size -gt 0 -and $null -ne $volume.SizeRemaining) {
                 $key = $volume.UniqueId
                 if (-not $volumesByDisk.ContainsKey($number)) { $volumesByDisk[$number] = @{} }
@@ -114,6 +125,10 @@ try {
         }
     }
 } catch {}
+foreach ($number in $namesByDisk.Keys) {
+    $rows[$number].VolumeNames = @($namesByDisk[$number] | Sort-Object { $_.Order }, { $_.Name } |
+        ForEach-Object { $_.Name } | Select-Object -Unique)
+}
 foreach ($number in $volumesByDisk.Keys) {
     $used = [uint64]0
     $available = [uint64]0
