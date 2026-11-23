@@ -37,6 +37,12 @@ Open **Linux System Monitor** from your application launcher. The installer uses
 - **Hardware** shows CPU cores, PCI and USB devices, motherboard and BIOS data, storage and filesystem utilization, disk throughput and latency, network interfaces, and exported temperatures and fan speeds. GPU readings come from Linux DRM, driver sensors and, for NVIDIA, `nvidia-smi` when available. A display adapter can appear even when its driver does not expose live counters or sensors. Device inventory is refreshed about every 45 seconds.
 - **Events** includes journal warnings and errors, plus specific events such as GPU faults, USB issues, drive timeouts, PCIe hardware errors, sleep and wake, crashes, and resource pressure warnings. Search by message or source, filter by category or severity, select a row for details, or export all matching retained event groups to CSV.
 
+## Drive health
+
+Overview detects connected drives and lists one card per drive. Select a card to see the last check, readings, and suggested steps for any warning. Cards turn yellow or red for warnings or critical conditions. **Check now** requests a background refresh. New health warnings are recorded in Events under Storage.
+
+Linux reads SMART through UDisks when available and can fall back to smartmontools for directly accessible drives. Supported sleeping HDDs are left asleep. USB flash drives and some enclosures may expose no SMART data. Permissions and controller support affect available readings.
+
 ## Dashboard updates
 
 The dashboard checks GitHub when it opens. Use **Check for updates** in the header to check again. Click **Update** when **Update Available** appears. The dashboard verifies the package against the GitHub manifest. It then updates the files, restarts the user service or portable collector as needed, and reopens. Existing history and network settings stay in the history directory. The update uses your current Python environment and runs without sudo.

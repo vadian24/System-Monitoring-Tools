@@ -637,8 +637,126 @@ def store_peers(db, now, rows):
         """, (*peer, country, pids, states, now, now, sent, received, flagged))
 
 
+def drive_result(drive, readings=(), issues=(), *, status="Unavailable", checked=None, note=""):
+    if issues:
+        status = "Critical" if any(issue[0] == "Critical" for issue in issues) else "Warning"
+    return {**drive, "readings": list(readings), "issues": list(issues),
+            "status": status,
+            "checked": time.time() if checked is None else checked, "note": note}
+
+
+BACK_UP = "Back up readable files to another drive now. If the errors persist or increase, plan to replace this drive."
+REPLACE_DRIVE = "Back up readable files to another drive immediately and plan to replace this drive."
+COOL_DRIVE = "Reduce disk activity, check airflow or enclosure cooling, and recheck the temperature."
+WEAR_DRIVE = "Confirm your backups are current and plan a replacement if the drive has reached its rated endurance."
+
+
+def drive_readings(values):
+    return [(label, value) for label, value in values if value is not None]
+
+
+def drive_health_worker(sampler):
+    previous = {}
+    observed_request = 0
+    deadline = 0
+    while not STOP.is_set():
+        try:
+            request = (STATE / "drive-health-check").stat().st_mtime_ns
+        except OSError:
+            request = 0
+        tick = time.monotonic()
+        try:
+            inventory = drive_inventory()
+            if inventory is not None:
+                refresh = tick >= deadline or request != observed_request
+                results = {}
+                for drive in inventory:
+                    if STOP.is_set():
+                        return
+                    old = previous.get(drive["id"])
+                    results[drive["id"]] = read_drive_health(drive, old) if refresh or old is None else old
+                sampler.drive_health = list(results.values())
+                previous = results
+                if refresh:
+                    observed_request = request
+                    deadline = tick + 300
+        except (OSError, ValueError, TypeError) as error:
+            print(f"Drive health: {error}", flush=True)
+        STOP.wait(5)
+
+
+def drive_health_events(rows, last):
+    events = []
+    attached = {drive["id"] for drive in rows}
+    for identity in last.keys() - attached:
+        del last[identity]
+    for drive in rows:
+        issues = drive["issues"]
+        if issues:
+            signature = tuple((level, reason) for level, reason, _ in issues)
+            if last.get(drive["id"]) != signature:
+                last[drive["id"]] = signature
+                severity = 3 if drive["status"] == "Critical" else 4
+                source = f'Drive health: {drive["name"]} ({drive["device"]})'
+                events.append((severity, "Storage", source, "; ".join(reason for _, reason, _ in issues)))
+        elif drive["status"] in ("SMART passed", "Healthy"):
+            last.pop(drive["id"], None)
+    return events
+
+
+def drive_inventory():
+    if not WINDOWS:
+        return None
+    data, _ = windows_platform.powershell_json(windows_platform.DRIVE_INVENTORY_SCRIPT, timeout=8)
+    if not isinstance(data, list):
+        return None
+    return [{"id": f"{row['Number']}:{row.get('Identity') or row.get('Name') or ''}",
+             "number": row["Number"], "device": f"Disk {row['Number']}",
+             "name": row.get("Name") or f"Disk {row['Number']}",
+             "kind": row.get("Bus") or "Storage", "storage": row.get("Storage"),
+             "windows_health": row.get("Health")} for row in data]
+
+
+def read_drive_health(drive, previous):
+    counters = None
+    health = drive["windows_health"]
+    if drive["storage"]:
+        data, _ = windows_platform.powershell_json(
+            windows_platform.DRIVE_HEALTH_SCRIPT, timeout=8,
+            variables={"MONITOR_DISK_NUMBER": str(drive["number"])})
+        if isinstance(data, dict):
+            counters = data.get("Counters")
+            health = data.get("Health")
+    counters = counters or {}
+    temp = counters.get("Temperature") or None
+    wear = counters.get("Wear")
+    read_errors = counters.get("ReadErrorsUncorrected")
+    write_errors = counters.get("WriteErrorsUncorrected")
+    readings = drive_readings([
+        ("Temperature", f"{temp} °C" if temp is not None else None),
+        ("Endurance used", f"{wear}%" if wear is not None else None),
+        ("Uncorrected read errors", read_errors), ("Uncorrected write errors", write_errors),
+        ("Power-on hours", counters.get("PowerOnHours"))])
+    issues = []
+    if health == 2:
+        issues.append(("Critical", "Windows reports this drive as unhealthy", REPLACE_DRIVE))
+    elif health == 1:
+        issues.append(("Warning", "Windows reports a drive health warning", BACK_UP))
+    if read_errors or write_errors:
+        issues.append(("Warning", f"Uncorrected errors: {read_errors or 0} read, {write_errors or 0} write", BACK_UP))
+    if wear is not None and wear >= 100:
+        issues.append(("Warning", f"Rated endurance used: {wear}%", WEAR_DRIVE))
+    status = "Healthy" if health == 0 and readings else "Unavailable"
+    note = ("Source: Windows storage reliability counters." if readings else
+            "Windows did not expose reliability counters for this drive. USB bridges, device drivers, and access permissions can limit what is available.")
+    return drive_result(drive, readings, issues, status=status, note=note)
+
+
 def run_samples(db, token=None):
     sampler = Sampler()
+    sampler.drive_health = None
+    threading.Thread(target=drive_health_worker, args=(sampler,), name="drive-health", daemon=True).start()
+    last_drive_alerts = {}
     network = NetworkSampler(STATE, command)
     conditions = {}
     next_sample = next_cleanup = 0
@@ -652,6 +770,8 @@ def run_samples(db, token=None):
         tick = time.monotonic()
         try:
             snapshot, events, gap = sampler.sample()
+            snapshot["drive_health"] = sampler.drive_health
+            events.extend(drive_health_events(sampler.drive_health or [], last_drive_alerts))
             traffic = network.sample()
             now = snapshot["ts"]
             span = tick - previous_tick

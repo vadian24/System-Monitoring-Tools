@@ -34,6 +34,15 @@ collector, run InstallWindowsMonitor.cmd --no-startup from Command Prompt.
 To disable collector startup later, open shell:startup from Windows Run
 and remove Windows System Monitor Collector.
 
+Drive health
+------------
+Overview detects connected drives and lists one card per drive. Select a
+card for its last check, readings, and suggested steps for any warning.
+Warning and critical cards turn yellow and red. Check now requests a
+background refresh. Drive health warnings appear under Storage in Events.
+Windows storage drivers, USB bridges and permissions determine which health
+and reliability readings are available.
+
 Dashboard updates
 -----------------
 The dashboard checks GitHub when it opens. Use Check for updates in the

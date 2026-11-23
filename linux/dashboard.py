@@ -13,7 +13,7 @@ import time
 from PySide6.QtCore import QAbstractTableModel, QLocale, QModelIndex, QRectF, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPushButton, QPlainTextEdit, QScrollArea, QSizePolicy,
                                QTabWidget, QTableView, QVBoxLayout, QWidget)
 
@@ -476,6 +476,7 @@ class Window(QMainWindow):
         cards, self.cards = metric_cards(zip(
             ("CPU utilization", "RAM in use", "Disk writes", "Full I/O pressure"), COLORS, (100, 100, None, 100)))
         layout.addLayout(cards)
+        self.add_drive_health(layout)
         gpu_header = QHBoxLayout()
         gpu_header.addWidget(label("GPU activity", "section"))
         gpu_header.addStretch()
@@ -909,7 +910,86 @@ class Window(QMainWindow):
         elif index == 5:
             self.show_traffic()
 
+    def add_drive_health(self, layout):
+        heading = QHBoxLayout()
+        heading.addWidget(label("Drive health", "section"))
+        heading.addStretch()
+        self.drive_check = QPushButton("Check now")
+        self.drive_check.clicked.connect(self.request_drive_health)
+        heading.addWidget(self.drive_check)
+        layout.addLayout(heading)
+        self.drive_caption = label("Waiting for drive health readings…", "muted")
+        self.drive_caption.setWordWrap(True)
+        layout.addWidget(self.drive_caption)
+        self.drive_cards = QGridLayout()
+        self.drive_cards.setColumnStretch(0, 1)
+        self.drive_cards.setColumnStretch(1, 1)
+        layout.addLayout(self.drive_cards)
+
+    def request_drive_health(self):
+        try:
+            (self.state / "drive-health-check").touch()
+        except OSError as error:
+            self.drive_caption.setText(f"Could not request a drive check. {error}")
+            return
+        self.drive_caption.setText("Drive health check requested.")
+        self.drive_check.setEnabled(False)
+        QTimer.singleShot(5000, self.finish_drive_check)
+
+    def finish_drive_check(self):
+        self.drive_check.setEnabled(True)
+        if self.drive_caption.text() == "Drive health check requested.":
+            self.drive_caption.setText("Drive health refresh runs in the background.")
+
+    def show_drive_health(self):
+        rows = self.snapshot.get("drive_health")
+        if rows == getattr(self, "visible_drive_health", None):
+            return
+        self.visible_drive_health = rows
+        while self.drive_cards.count():
+            self.drive_cards.takeAt(0).widget().deleteLater()
+        self.drive_caption.setText("Select a drive for readings and next steps." if rows else
+                                   "No drives detected." if rows == [] else "Waiting for drive health readings…")
+        for index, drive in enumerate(rows or []):
+            status = drive["status"]
+            reason = next((reason for level, reason, _ in drive["issues"] if level == status), drive["device"])
+            card = QPushButton(f'{drive["name"][:45]}\n{status} · {reason[:66]}')
+            card.setMinimumHeight(64)
+            card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            card.setToolTip(f'{drive["name"]} — {status} · {reason}')
+            card.setAccessibleName(f'{drive["name"]}. {status}. {reason}.')
+            background, foreground = {
+                "Critical": ("#be273d", "#ffffff"),
+                "Warning": ("#ffd45b", "#191300"),
+                "SMART passed": ("#1b2b27", "#a9edbc"),
+                "Healthy": ("#1b2b27", "#a9edbc"),
+            }.get(status, ("#262d39", "#d1d6df"))
+            card.setStyleSheet(f"QPushButton {{background:{background}; color:{foreground}; text-align:left;"
+                               " padding:8px 12px; border:2px solid transparent; border-radius:8px;}"
+                               f" QPushButton:hover, QPushButton:focus {{border-color:{foreground};}}")
+            card.clicked.connect(lambda checked=False, selected=drive: self.show_drive_details(selected))
+            self.drive_cards.addWidget(card, index // 2, index % 2)
+
+    def show_drive_details(self, drive):
+        checked = local_time(drive["checked"]) if drive["checked"] else "No successful check"
+        lines = [f'{drive["name"]} · {drive["kind"]} · {drive["device"]}',
+                 f'Status: {drive["status"]}', f"Last check: {checked}"]
+        if drive["note"]:
+            lines += ["", drive["note"]]
+        if drive["readings"]:
+            lines += ["", "Health readings", *(f"{name}: {value}" for name, value in drive["readings"])]
+        if drive["issues"]:
+            lines += ["", "Why this was flagged and what to do next"]
+            for _, reason, advice in sorted(drive["issues"], key=lambda issue: issue[0] != "Critical"):
+                lines += ["", reason, advice]
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Drive health")
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setText("\n".join(lines))
+        dialog.exec()
+
     def show_overview(self):
+        self.show_drive_health()
         s = self.snapshot
         if s:
             values = [

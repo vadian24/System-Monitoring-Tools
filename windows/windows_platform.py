@@ -62,6 +62,40 @@ foreach ($entry in @(
 ConvertTo-Json -InputObject $rows -Depth 3 -Compress
 """
 
+DRIVE_INVENTORY_SCRIPT = r"""
+$rows = @{}
+try {
+    Get-Disk | ForEach-Object {
+        $bus = [string]$_.BusType
+        if ($bus -notin @('File Backed Virtual', 'Storage Spaces')) {
+            $rows[[int]$_.Number] = @{ Number = [int]$_.Number; Name = $_.FriendlyName; Bus = $bus;
+                Identity = $_.UniqueId; Health = [int]$_.HealthStatus; Storage = $true }
+        }
+    }
+} catch {}
+try {
+    Get-CimInstance -ClassName Win32_DiskDrive -OperationTimeoutSec 4 | ForEach-Object {
+        if ($null -ne $_.Index -and -not $rows.ContainsKey([int]$_.Index)) {
+            $rows[[int]$_.Index] = @{ Number = [int]$_.Index; Name = $_.Model; Bus = $_.InterfaceType;
+                Identity = $_.PNPDeviceID; Storage = $false }
+        }
+    }
+} catch {
+    if (-not $rows.Count) { throw }
+}
+ConvertTo-Json -InputObject @($rows.Values | Sort-Object { $_.Number }) -Depth 3 -Compress
+"""
+
+DRIVE_HEALTH_SCRIPT = r"""
+$disk = Get-Disk -Number ([int]$env:MONITOR_DISK_NUMBER)
+$counters = $null
+try {
+    $counters = Get-StorageReliabilityCounter -Disk $disk |
+        Select-Object -First 1 Temperature, Wear, ReadErrorsUncorrected, WriteErrorsUncorrected, PowerOnHours
+} catch {}
+ConvertTo-Json -InputObject @{ Health = [int]$disk.HealthStatus; Counters = $counters } -Depth 3 -Compress
+"""
+
 SHORTCUT_RENAME_SCRIPT = r"""
 $shell = New-Object -ComObject WScript.Shell
 $arguments = '"' + $env:MONITOR_MAIN + '"'

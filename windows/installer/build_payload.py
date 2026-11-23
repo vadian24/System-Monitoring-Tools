@@ -16,7 +16,7 @@ with ZipFile(build / 'monitor-payload.zip','w',ZIP_DEFLATED,compresslevel=9) as 
     z.writestr(prefix+'requirements.txt',requirements)
     readme = (root/'README.txt').read_text()
     start = readme.index('Install\n-------')
-    end = readme.index('Dashboard updates\n')
+    end = readme.index('Drive health\n')
     readme = readme[:start] + '''Install
 -------
 Double-click SystemMonitorSetup.exe. If needed, setup downloads and

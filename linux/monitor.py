@@ -654,8 +654,247 @@ def store_peers(db, now, rows):
         """, (*peer, country, pids, states, now, now, sent, received, flagged))
 
 
+def drive_result(drive, readings=(), issues=(), *, status="Unavailable", checked=None, note=""):
+    if issues:
+        status = "Critical" if any(issue[0] == "Critical" for issue in issues) else "Warning"
+    return {**drive, "readings": list(readings), "issues": list(issues),
+            "status": status,
+            "checked": time.time() if checked is None else checked, "note": note}
+
+
+BACK_UP = "Back up readable files to another drive now. If the errors persist or increase, plan to replace this drive."
+REPLACE_DRIVE = "Back up readable files to another drive immediately and plan to replace this drive."
+COOL_DRIVE = "Reduce disk activity, check airflow or enclosure cooling, and recheck the temperature."
+WEAR_DRIVE = "Confirm your backups are current and plan a replacement if the drive has reached its rated endurance."
+
+
+def drive_readings(values):
+    return [(label, value) for label, value in values if value is not None]
+
+
+def drive_health_worker(sampler):
+    previous = {}
+    observed_request = 0
+    deadline = 0
+    while not STOP.is_set():
+        try:
+            request = (STATE / "drive-health-check").stat().st_mtime_ns
+        except OSError:
+            request = 0
+        tick = time.monotonic()
+        try:
+            inventory = drive_inventory()
+            if inventory is not None:
+                refresh = tick >= deadline or request != observed_request
+                results = {}
+                for drive in inventory:
+                    if STOP.is_set():
+                        return
+                    old = previous.get(drive["id"])
+                    results[drive["id"]] = read_drive_health(drive, old) if refresh or old is None else old
+                sampler.drive_health = list(results.values())
+                previous = results
+                if refresh:
+                    observed_request = request
+                    deadline = tick + 300
+        except (OSError, ValueError, TypeError) as error:
+            print(f"Drive health: {error}", flush=True)
+        STOP.wait(5)
+
+
+def drive_health_events(rows, last):
+    events = []
+    attached = {drive["id"] for drive in rows}
+    for identity in last.keys() - attached:
+        del last[identity]
+    for drive in rows:
+        issues = drive["issues"]
+        if issues:
+            signature = tuple((level, reason) for level, reason, _ in issues)
+            if last.get(drive["id"]) != signature:
+                last[drive["id"]] = signature
+                severity = 3 if drive["status"] == "Critical" else 4
+                source = f'Drive health: {drive["name"]} ({drive["device"]})'
+                events.append((severity, "Storage", source, "; ".join(reason for _, reason, _ in issues)))
+        elif drive["status"] in ("SMART passed", "Healthy"):
+            last.pop(drive["id"], None)
+    return events
+
+
+def drive_inventory():
+    result, code, _ = command(["lsblk", "--json", "--nodeps", "--output", "NAME,TYPE,MODEL,TRAN,ROTA,SERIAL"])
+    if code:
+        return None
+    drives = {}
+    for disk in json.loads(result).get("blockdevices", []):
+        name = disk["name"]
+        if disk["type"] != "disk" or not re.fullmatch(r"[A-Za-z0-9_-]+", name) or name.startswith(("ram", "zram")):
+            continue
+        controller = re.fullmatch(r"(nvme\d+)n\d+", name)
+        device = f"/dev/{name}"
+        group = controller[1] if controller else name
+        sequence = read(Path("/sys/class/block") / name / "diskseq")
+        identity = f"{group}:{disk.get('serial') or sequence or name}"
+        kind = "NVMe" if controller else "USB" if disk.get("tran") == "usb" else "HDD" if disk.get("rota") else "SSD / flash"
+        drives.setdefault(group, {"id": identity, "name": (disk.get("model") or name).strip(),
+                                  "kind": kind, "device": device})
+    return list(drives.values())
+
+
+def udisks_drive(drive):
+    output, code, _ = command(["busctl", "--system", "--json=short", "call", "org.freedesktop.UDisks2",
+                               "/org/freedesktop/UDisks2", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects"])
+    if code:
+        return None
+    objects, = json.loads(output)["data"]
+    block = objects.get("/org/freedesktop/UDisks2/block_devices/" + Path(drive["device"]).name, {})
+    properties = block.get("org.freedesktop.UDisks2.Block", {})
+    path = properties.get("Drive", {}).get("data")
+    if not path or path == "/":
+        return None
+    for protocol in ("Drive.Ata", "NVMe.Controller"):
+        interface = "org.freedesktop.UDisks2." + protocol
+        if interface in objects.get(path, {}):
+            return path, interface
+    return None
+
+
+def udisks_call(path, interface, method, *options):
+    return command(["busctl", "--system", "--allow-interactive-authorization=no", "--json=short", "call",
+                    "org.freedesktop.UDisks2", path, interface, method, "a{sv}", *options], timeout=5)
+
+
+def udisks_read_health(drive, previous):
+    endpoint = udisks_drive(drive)
+    if not endpoint:
+        return None
+    path, interface = endpoint
+    is_ata = interface.endswith(".Ata")
+    _, update_code, error = udisks_call(path, interface, "SmartUpdate", *(
+        ("1", "nowakeup", "b", "true") if is_ata else ("0",)))
+    sleeping = is_ata and update_code and ("sleep" in error.lower() or "wake" in error.lower())
+    raw, code, _ = command(["busctl", "--system", "--json=short", "call", "org.freedesktop.UDisks2", path,
+                            "org.freedesktop.DBus.Properties", "GetAll", "s", interface])
+    if code:
+        return sleeping_drive(drive, previous) if sleeping else None
+    properties, = json.loads(raw)["data"]
+    values = {key: item["data"] for key, item in properties.items()}
+    checked = values.get("SmartUpdated")
+    if not checked:
+        return sleeping_drive(drive, previous) if sleeping else None
+    temp = values.get("SmartTemperature")
+    temp = round(temp - 273.15, 1) if temp else None
+    if is_ata:
+        bad = max(0, values.get("SmartNumBadSectors", 0))
+        issues = []
+        if values.get("SmartFailing"):
+            issues.append(("Critical", "SMART health check failed", REPLACE_DRIVE))
+        if bad:
+            issues.append(("Warning", f"{bad} bad sectors reported", BACK_UP))
+        raw, code, _ = udisks_call(path, interface, "SmartGetAttributes", "1", "nowakeup", "b", "true")
+        attributes = {}
+        if not code:
+            rows, = json.loads(raw)["data"]
+            attributes = {row[1].lower().replace("_", "-"): row[6] for row in rows if row[7] == 3 and row[6] >= 0}
+        for attr, label in (("current-pending-sector", "Pending sectors"),
+                            ("reallocated-sector-count", "Reallocated sectors"),
+                            ("offline-uncorrectable", "Uncorrectable sectors")):
+            if attributes.get(attr):
+                issues.append(("Warning", f"{label}: {attributes[attr]}", BACK_UP))
+        readings = drive_readings([("Temperature", f"{temp} °C" if temp is not None else None),
+                                   ("Bad sectors", bad), ("Pending sectors", attributes.get("current-pending-sector")),
+                                   ("Reallocated sectors", attributes.get("reallocated-sector-count")),
+                                   ("Uncorrectable sectors", attributes.get("offline-uncorrectable"))])
+    else:
+        raw, code, _ = udisks_call(path, interface, "SmartGetAttributes", "0")
+        health = {}
+        if not code:
+            report, = json.loads(raw)["data"]
+            health = {key: item["data"] for key, item in report.items()}
+        warnings = values.get("SmartCriticalWarning", [])
+        issues = nvme_issues(warnings, health.get("media_errors"), health.get("percent_used"))
+        wear = health.get("percent_used")
+        threshold = health.get("wctemp")
+        if not warnings and temp is not None and threshold and values["SmartTemperature"] >= threshold:
+            issues.append(("Warning", "Temperature reached the drive's warning threshold", COOL_DRIVE))
+        readings = drive_readings([("Temperature", f"{temp} °C" if temp is not None else None),
+                                   ("Endurance used", f"{wear}%" if wear is not None else None),
+                                   ("Media errors", health.get("media_errors"))])
+    result = drive_result(drive, readings, issues, status="SMART passed", checked=checked, note="Source: UDisks SMART data.")
+    return sleeping_drive(drive, result) if sleeping else result
+
+
+def sleeping_drive(drive, previous):
+    return drive_result(drive, previous["readings"] if previous else (),
+                        previous["issues"] if previous else (), status="Sleeping",
+                        checked=previous["checked"] if previous else 0,
+                        note="The check left this drive asleep. Any readings shown are from its last successful check.")
+
+
+def nvme_issues(warnings, errors, wear):
+    issues = []
+    if warnings:
+        temperature_only = warnings == ["temperature"] or warnings == 2
+        reason = "NVMe temperature warning" if temperature_only else (
+            "NVMe critical warning: " + ", ".join(warnings) if isinstance(warnings, list)
+            else f"NVMe critical warning flags: 0x{warnings:02x}")
+        issues.append(("Warning" if temperature_only else "Critical", reason, COOL_DRIVE if temperature_only else REPLACE_DRIVE))
+    if errors:
+        issues.append(("Warning", f"Media and data integrity errors: {errors}", BACK_UP))
+    if wear is not None and wear >= 100:
+        issues.append(("Warning", f"Rated endurance used: {wear}%", WEAR_DRIVE))
+    return issues
+
+
+def read_drive_health(drive, previous):
+    try:
+        udisks = udisks_read_health(drive, previous)
+    except (KeyError, TypeError, ValueError):
+        udisks = None
+    if udisks:
+        return udisks
+    # On USB, querying unknown bridges can wake a sleeping disk before a power check.
+    if drive["kind"] == "USB":
+        return drive_result(drive, note="SMART data is unavailable through this USB device. For an external HDD or SSD, try an enclosure that supports SMART passthrough.")
+    args = ["smartctl", "-j", "-H", "-A"]
+    if drive["kind"] == "HDD":
+        args += ["-n", "standby,3,5"]
+    raw, code, _ = command([*args, drive["device"]], timeout=5)
+    if drive["kind"] == "HDD" and code == 3:
+        return sleeping_drive(drive, previous)
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = {}
+    smart = data.get("smart_status", {}).get("passed")
+    nvme = data.get("nvme_smart_health_information_log", {})
+    if smart is None and not nvme:
+        return drive_result(drive, note="SMART data could not be read. The device may not support SMART or require additional access through UDisks or smartmontools.")
+    temp = data.get("temperature", {}).get("current")
+    wear, errors = nvme.get("percentage_used"), nvme.get("media_errors")
+    issues = nvme_issues(nvme.get("critical_warning"), errors, wear)
+    if smart is False and not nvme.get("critical_warning"):
+        issues.append(("Critical", "SMART health check failed", REPLACE_DRIVE))
+    readings = drive_readings([("Temperature", f"{temp} °C" if temp is not None else None),
+                               ("Endurance used", f"{wear}%" if wear is not None else None), ("Media errors", errors)])
+    attributes = {row["name"]: row.get("raw", {}).get("value") for row in data.get("ata_smart_attributes", {}).get("table", [])}
+    for attr, label in (("Current_Pending_Sector", "Pending sectors"),
+                        ("Reallocated_Sector_Ct", "Reallocated sectors"),
+                        ("Offline_Uncorrectable", "Uncorrectable sectors")):
+        count = attributes.get(attr)
+        if count is not None:
+            readings.append((label, count))
+        if count:
+            issues.append(("Warning", f"{label}: {count}", BACK_UP))
+    status = "SMART passed" if smart is True else "Unavailable"
+    return drive_result(drive, readings, issues, status=status, note="Source: smartmontools.")
+
+
 def run_samples(db, token=None):
     sampler = Sampler()
+    sampler.drive_health = None
+    threading.Thread(target=drive_health_worker, args=(sampler,), name="drive-health", daemon=True).start()
+    last_drive_alerts = {}
     network = NetworkSampler(STATE, command)
     conditions = {}
     next_sample = next_cleanup = 0
@@ -669,6 +908,8 @@ def run_samples(db, token=None):
         tick = time.monotonic()
         try:
             snapshot, events, gap = sampler.sample()
+            snapshot["drive_health"] = sampler.drive_health
+            events.extend(drive_health_events(sampler.drive_health or [], last_drive_alerts))
             traffic = network.sample()
             now = snapshot["ts"]
             span = tick - previous_tick
