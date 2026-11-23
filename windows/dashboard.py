@@ -606,11 +606,15 @@ class Window(QMainWindow):
         self.range.currentIndexChanged.connect(self.refresh_history)
         toolbar.addWidget(self.range)
         layout.addLayout(toolbar)
-        system_metrics = ("CPU utilization", "RAM in use")
+        system_metrics = (
+            ("CPU utilization", COLORS[0], 100),
+            ("CPU temperature", COLORS[2] if WINDOWS else COLORS[3], None),
+            ("RAM in use", COLORS[1], 100),
+        )
         if not WINDOWS:
-            system_metrics += ("Full I/O pressure",)
-        system_metrics += ("CPU temperature",)
-        cards, self.cards = metric_cards(zip(system_metrics, COLORS, (100,) * (len(system_metrics) - 1) + (None,)))
+            system_metrics += (("Full I/O pressure", COLORS[2], 100),)
+        cards, (cpu, self.cpu_temperature_card, *rest) = metric_cards(system_metrics)
+        self.system_cards = [cpu, *rest]
         layout.addLayout(cards)
         self.add_drive_health(layout)
         gpu_header = QHBoxLayout()
@@ -1269,7 +1273,7 @@ class Window(QMainWindow):
         if s:
             readings = ((s.get("cpu"), 80, 95), (s.get("memory"), 85, 95),
                         (s.get("pressure", {}).get("io.full"), 5, 50))
-            for key, (metric, chart), (value, warning, critical) in zip(("cpu", "memory", "io"), self.cards[:-1], readings):
+            for key, (metric, chart), (value, warning, critical) in zip(("cpu", "memory", "io"), self.system_cards, readings):
                 metric.setText(percent(value))
                 level = self.graph_level(key, threshold_level(value, warning, critical))
                 color_graph(chart.parentWidget(), level, f"Yellow at {warning}%. Red at {critical}%.")
@@ -1294,7 +1298,7 @@ class Window(QMainWindow):
 
     def show_cpu_temperature(self):
         value, high, critical, source = self.snapshot.get("cpu_temperature") or (None, None, None, "")
-        metric, chart = self.cards[-1]
+        metric, chart = self.cpu_temperature_card
         metric.setText(celsius(value))
         if value is None:
             self.graph_level("cpu-temp", None)
@@ -1320,7 +1324,7 @@ class Window(QMainWindow):
                 rows = db.execute(f"SELECT {columns} FROM samples WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
         except sqlite3.Error:
             rows = []
-        for column, (_, chart) in enumerate(self.cards[:-1], 1):
+        for column, (_, chart) in enumerate(self.system_cards, 1):
             chart.set_values([(row[0], row[column]) for row in rows])
         try:
             with database(True) as db:
@@ -1328,7 +1332,7 @@ class Window(QMainWindow):
                     "SELECT ts,celsius FROM cpu_temperature_history WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
         except sqlite3.Error:
             temperatures = []
-        self.cards[-1][1].set_values([tuple(row) for row in temperatures])
+        self.cpu_temperature_card[1].set_values([tuple(row) for row in temperatures])
         self.refresh_drive_activity_history(cutoff)
         self.refresh_gpu_history(cutoff)
         self.refresh_network_charts(self.overview_network_cards, self.network_health_caption, cutoff)
