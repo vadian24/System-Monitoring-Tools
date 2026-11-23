@@ -406,6 +406,41 @@ class DriveCard(QPushButton):
         return self.layout().minimumSize() if self.layout() else super().minimumSizeHint()
 
 
+class DriveGrid(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.cards = []
+        self.columns = 0
+
+    def set_cards(self, cards):
+        for card in self.cards:
+            self.grid.removeWidget(card)
+            card.deleteLater()
+        self.cards = cards
+        self.arrange(self.width(), force=True)
+
+    def arrange(self, width, *, force=False):
+        card_width = max(350, max((card.minimumSizeHint().width() for card in self.cards), default=0))
+        gap = max(0, self.grid.horizontalSpacing())
+        count = max(2, min(4, len(self.cards), (width + gap) // (card_width + gap)))
+        if not force and count == self.columns:
+            return
+        for card in self.cards:
+            self.grid.removeWidget(card)
+        for column in range(4):
+            self.grid.setColumnStretch(column, int(column < count))
+        for index, card in enumerate(self.cards):
+            row, column = divmod(index, count)
+            self.grid.addWidget(card, row, column)
+        self.columns = count
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.arrange(event.size().width())
+
+
 def drive_metric(title, text, state=None):
     column = QVBoxLayout()
     column.setSpacing(2)
@@ -1025,10 +1060,8 @@ class Window(QMainWindow):
         self.drive_caption = label("Waiting for drive health readings…", "muted")
         self.drive_caption.setWordWrap(True)
         layout.addWidget(self.drive_caption)
-        self.drive_cards = QGridLayout()
-        self.drive_cards.setColumnStretch(0, 1)
-        self.drive_cards.setColumnStretch(1, 1)
-        layout.addLayout(self.drive_cards)
+        self.drive_cards = DriveGrid()
+        layout.addWidget(self.drive_cards)
 
     def request_drive_health(self):
         try:
@@ -1100,11 +1133,10 @@ class Window(QMainWindow):
         for key in self.graph_streaks.keys() - active:
             if isinstance(key, tuple) and key[0] == "disk":
                 del self.graph_streaks[key]
-        while self.drive_cards.count():
-            self.drive_cards.takeAt(0).widget().deleteLater()
         self.drive_caption.setText("Select a drive for readings and next steps." if rows else
                                    "No drives detected." if rows == [] else "Waiting for drive health readings…")
-        for index, drive in enumerate(rows or []):
+        cards = []
+        for drive in rows or []:
             status = drive["status"]
             check = drive.get("health_check", status)
             readings = dict(drive["readings"])
@@ -1183,7 +1215,8 @@ class Window(QMainWindow):
             for child in card.findChildren(QLabel):
                 child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             card.clicked.connect(lambda checked=False, selected=drive: self.show_drive_details(selected))
-            self.drive_cards.addWidget(card, index // 2, index % 2)
+            cards.append(card)
+        self.drive_cards.set_cards(cards)
         if self.drive_activity_cards:
             self.refresh_drive_activity_history(int(time.time() - self.range.currentData()))
 
