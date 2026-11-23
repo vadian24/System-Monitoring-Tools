@@ -409,15 +409,15 @@ class DriveCard(QPushButton):
 
 def drive_metric(title, text, state=None):
     column = QVBoxLayout()
-    column.setSpacing(4)
+    column.setSpacing(2)
     column.addWidget(label(title, "metricTitle"))
     value = label(text)
     value.setWordWrap(True)
     if state:
         background, foreground = DRIVE_COLORS[state]
-        value.setStyleSheet(f"background:{background}; color:{foreground}; border-radius:5px; padding:4px; font-weight:600;")
+        value.setStyleSheet(f"background:{background}; color:{foreground}; border-radius:5px; padding:2px 4px; font-weight:600;")
     else:
-        value.setStyleSheet("font-size:17px; font-weight:700;")
+        value.setStyleSheet("font-size:14px; font-weight:700;")
     column.addWidget(value)
     return column
 
@@ -1130,14 +1130,18 @@ class Window(QMainWindow):
                 f"QPushButton {{background:{background}; border:1px solid {border}; border-radius:12px; padding:0;}}"
                 "QPushButton:hover, QPushButton:focus {border-color:#76ccff;}")
             contents = QVBoxLayout(card)
-            contents.setContentsMargins(13, 10, 13, 9)
+            contents.setContentsMargins(11, 7, 11, 7)
+            contents.setSpacing(5)
+            header = QHBoxLayout()
             identity = label(drive["name"], "metricTitle")
             identity.setTextFormat(Qt.TextFormat.PlainText)
             identity.setWordWrap(True)
-            contents.addWidget(identity)
+            header.addWidget(identity, 1)
             kind = label(f'{drive["kind"]} · {drive["device"]}', "muted")
             kind.setTextFormat(Qt.TextFormat.PlainText)
-            contents.addWidget(kind)
+            kind.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            header.addWidget(kind)
+            contents.addLayout(header)
             if reason:
                 alert = label(reason)
                 alert.setTextFormat(Qt.TextFormat.PlainText)
@@ -1157,24 +1161,26 @@ class Window(QMainWindow):
             contents.addLayout(metrics)
             activity = QFrame(objectName="card")
             details = QVBoxLayout(activity)
-            details.setContentsMargins(9, 7, 9, 6)
-            details.addWidget(label("Activity", "metricTitle"))
+            details.setContentsMargins(8, 5, 8, 5)
+            details.setSpacing(3)
             live = QGridLayout()
+            live.setVerticalSpacing(2)
+            live.setHorizontalSpacing(10)
+            live.setColumnStretch(1, 1)
+            live.setColumnStretch(3, 1)
             values = []
-            for column, name in enumerate(("Read", "Write", "Busy", "Write latency")):
-                live.addWidget(label(name, "muted"), 0, column)
-                value = label("—")
-                live.addWidget(value, 1, column)
-                values.append(value)
-            for column, name in ((0, "Used"), (2, "Available")):
+            for metric_index, name in enumerate(("Read", "Write", "Busy", "Write latency", "Used", "Available")):
+                row, group = divmod(metric_index, 2)
+                column = group * 2
                 field = label(name, "muted")
-                field.setToolTip("Total across readable filesystems on this drive.")
-                live.addWidget(field, 2, column, 1, 2)
+                live.addWidget(field, row, column)
                 value = label("—")
-                live.addWidget(value, 3, column, 1, 2)
+                value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                live.addWidget(value, row, column + 1)
                 values.append(value)
             details.addLayout(live)
             graph = Spark(COLORS[0])
+            graph.setMinimumHeight(36)
             graph.reference_color = QColor(COLORS[3])
             graph.setToolTip("Read throughput in solid blue. Write throughput in dashed orange.")
             details.addWidget(graph)
