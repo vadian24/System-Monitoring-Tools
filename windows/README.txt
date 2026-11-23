@@ -56,6 +56,25 @@ drives). GPU load turns yellow at 85% and red at 95% while thermal throttling
 is reported. Temperature uses reported device thresholds. Hover a colored
 card for its rule.
 
+CPU, I/O, and frame telemetry
+-----------------------------
+Overview shows CPU clocks, package power, Vcore, processor queue length,
+and recent process CPU time. Hardware adds per-core sensor readings,
+logical CPU utilization, and recent plus cumulative CPU time by process.
+CPU power, voltage, and core sensors depend on a Libre Hardware Monitor
+or Open Hardware Monitor WMI provider and the sensors it exposes. The
+system clock estimate is used when per-core clock readings are absent.
+
+Hardware lists throughput, operations per second, average read and write
+latency, busy time and average queue depth per drive where available.
+Linux pressure and TRIM counts are unavailable from these Windows counters.
+
+Select Open frame capture in Overview or Hardware to read a PresentMon
+or MangoHud CSV, including new complete samples as they are written. Use a
+capture targeted to one game. CPU time per frame requires a CSV recording
+that includes that field. GPU utilization displays the current adapter
+reading labeled Live when there is no GPU utilization column in the file.
+
 Dashboard updates
 -----------------
 The dashboard checks GitHub when it opens. Use Check for updates in the

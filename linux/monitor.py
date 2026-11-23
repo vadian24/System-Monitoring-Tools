@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """Local Linux telemetry collector and Qt desktop launcher."""
 import argparse
-from collections import Counter
+from collections import Counter, deque
 import csv
 from functools import lru_cache
 import json
@@ -76,6 +76,7 @@ def initialize(db):
             ts INTEGER PRIMARY KEY, cpu REAL, memory REAL, io_full REAL,
             disk_write REAL, network REAL
         );
+        CREATE TABLE IF NOT EXISTS io_pressure_history (ts INTEGER PRIMARY KEY, some REAL);
         CREATE TABLE IF NOT EXISTS drive_activity_history (
             ts INTEGER NOT NULL, device TEXT NOT NULL, read_rate REAL, write_rate REAL,
             PRIMARY KEY(ts, device)
@@ -542,6 +543,99 @@ def cpu_temperature(sensors):
     return [value, high, critical, f"{driver} · {name}"]
 
 
+def cpu_list(text):
+    for part in text.split(","):
+        if re.fullmatch(r"\d+(-\d+)?", part):
+            start, _, end = part.partition("-")
+            yield from range(int(start), int(end or start) + 1)
+
+
+@lru_cache(maxsize=1)
+def cpu_topology():
+    pmu = Path("/sys/bus/event_source/devices")
+    types = {cpu: kind for device, kind in (("cpu_core", "Performance"), ("cpu_atom", "Efficiency"))
+             for cpu in cpu_list(read(pmu / device / "cpus"))}
+    groups = {}
+    for node in Path("/sys/devices/system/cpu").glob("cpu[0-9]*"):
+        cpu = int(node.name[3:])
+        topology = node / "topology"
+        package = read(topology / "physical_package_id")
+        core = read(topology / "core_id")
+        identity = (int(package), int(core)) if package.isdecimal() and core.isdecimal() else (None, cpu)
+        groups.setdefault(identity, []).append((cpu, node, types.get(cpu)))
+    return sorted(groups.items(), key=lambda item: (item[0][0] is None, item[0][0] or 0, item[0][1]))
+
+
+def cpu_sensor_details(cores, previous_energy, elapsed):
+    sensors = {}
+    package = None
+    for node in Path("/sys/class/hwmon").glob("hwmon*"):
+        if read(node / "name") != "coretemp":
+            continue
+        labels = [(label, read(label)) for label in node.glob("temp*_label")]
+        package = next((int(match[1]) for _, name in labels
+                        if (match := re.fullmatch(r"Package id (\d+)", name))), None)
+        if package is None:
+            continue
+        for label, name in labels:
+            match = re.fullmatch(r"Core (\d+)", name)
+            if match:
+                prefix = label.name.removesuffix("_label")
+                sensors[package, int(match[1])] = (read_number(node / f"{prefix}_input", 1000),
+                                                   read_number(node / f"{prefix}_crit", 1000))
+    voltages = []
+    for node in Path("/sys/class/hwmon").glob("hwmon*"):
+        for label in node.glob("in*_label"):
+            if re.sub(r"[^a-z0-9]", "", read(label).lower()) in ("vcore", "cpuvcore"):
+                value = read_number(label.with_name(label.name.replace("_label", "_input")), 1000)
+                if value is not None and 0 < value <= 5:
+                    voltages.append(value)
+    energy = {}
+    watts = []
+    for domain in Path("/sys/class/powercap").glob("*"):
+        if not re.fullmatch(r"package-\d+", read(domain / "name")):
+            continue
+        value = read_number(domain / "energy_uj")
+        maximum = read_number(domain / "max_energy_range_uj")
+        if value is None:
+            continue
+        energy[domain.name] = value
+        old = previous_energy.get(domain.name)
+        if old is not None and elapsed <= 10:
+            delta = value - old
+            if delta < 0 and maximum:
+                delta += maximum
+            if delta >= 0:
+                watts.append(delta / 1_000_000 / elapsed)
+    rows = []
+    for (package, core), threads in cpu_topology():
+        speeds = [read_number(node / "cpufreq" / "scaling_cur_freq", 1000) for _, node, _ in threads]
+        clock = max((value for value in speeds if value and value > 0), default=None)
+        utilization = [cores[cpu] for cpu, _, _ in threads if cpu < len(cores)]
+        temp, limit = sensors.get((package, core), (None, None))
+        name = f"Core {core}" if package in (0, None) else f"CPU {package} / Core {core}"
+        rows.append((name, threads[0][2], clock, sum(utilization) / len(utilization) if utilization else None,
+                     temp, limit - temp if temp is not None and limit and limit > 0 else None))
+    load = os.getloadavg()
+    running = next((line.split()[1] for line in read("/proc/stat").splitlines()
+                    if line.startswith("procs_running ")), "")
+    return dict(cores=rows, watts=sum(watts) if watts else None, volts=voltages[0] if len(voltages) == 1 else None,
+                load=load, queue=int(running) if running.isdecimal() else None, queue_label="runnable tasks"), energy
+
+
+def linux_disk_detail(node, previous, elapsed):
+    try:
+        fields = tuple(map(int, read(node / "stat").split()))
+    except ValueError:
+        fields = ()
+    if previous is None or len(fields) < 11 or len(previous) < 11:
+        return fields, (None, None)
+    queue = fields[10] - previous[10]
+    discard = fields[11] - previous[11] if min(len(fields), len(previous)) >= 15 else -1
+    return fields, (queue / (elapsed * 1000) if queue >= 0 else None,
+                    discard / elapsed if discard >= 0 else None)
+
+
 class Sampler:
     def __init__(self):
         self.gpu_metrics = [], {}, "Checking display adapters"
@@ -551,7 +645,10 @@ class Sampler:
         self.net = psutil.net_io_counters(pernic=True, nowrap=False) or {}
         self.network_health = NetworkHealthSampler()
         self.psi = {}
+        self.energy = {}
+        self.disk_detail = {}
         self.proc_io = {}
+        self.proc_times = deque()
         self.inventory = []
         self.mounts = []
         self.services = []
@@ -572,17 +669,26 @@ class Sampler:
         psi, self.psi = pressure({} if gap else self.psi, elapsed)
         disk = psutil.disk_io_counters(perdisk=True, nowrap=False) or {}
         drives = []
+        disk_detail = {}
         for node in sorted(Path("/sys/block").glob("*")):
             name = node.name
             if name.startswith(("loop", "ram", "zram", "dm-")) or name not in disk:
                 continue
             current, old = disk[name], self.disk.get(name, disk[name])
             writes = max(0, current.write_count - old.write_count)
+            reads = current.read_count - old.read_count
+            valid = name in self.disk and not gap and reads >= 0 and current.write_count >= old.write_count
+            fields, detail = linux_disk_detail(node, self.disk_detail.get(name) if valid else None, elapsed)
+            disk_detail[name] = fields
             drives.append([name, read(node/"device/model") or name,
                            max(0, current.read_bytes-old.read_bytes)/elapsed,
                            max(0, current.write_bytes-old.write_bytes)/elapsed,
                            min(100, max(0, current.busy_time-old.busy_time)/elapsed/10),
-                           max(0, current.write_time-old.write_time)/writes if writes else None])
+                           max(0, current.write_time-old.write_time)/writes if writes else None,
+                           reads/elapsed if valid else None, writes/elapsed if valid else None,
+                           (current.read_time-old.read_time)/reads if valid and reads and current.read_time >= old.read_time else None,
+                           *detail])
+        self.disk_detail = disk_detail
         self.disk = disk
         net = psutil.net_io_counters(pernic=True, nowrap=False) or {}
         timeouts, drops, carrier_losses, network_events = self.network_health.sample(net, self.net)
@@ -597,6 +703,13 @@ class Sampler:
         self.net = net
         processes = []
         io_cache = {}
+        cpu_times = {}
+        process_times = []
+        cutoff = tick - 60
+        while len(self.proc_times) > 1 and self.proc_times[1][0] <= cutoff:
+            self.proc_times.popleft()
+        baseline = self.proc_times[0][1] if self.proc_times and self.proc_times[0][0] <= cutoff else None
+        minimum_start = time.time() - 60
         for proc in psutil.process_iter(["pid", "name", "username", "memory_info", "status", "create_time"], ad_value=None):
             try:
                 info = proc.info
@@ -608,12 +721,24 @@ class Sampler:
                     write = max(0, io.write_bytes-old)/elapsed
                 except (psutil.AccessDenied, PermissionError):
                     write = None
+                try:
+                    times = proc.cpu_times()
+                    total = times.user + times.system
+                    cpu_times[key] = total
+                    old_total = baseline.get(key) if baseline is not None else None
+                    if old_total is None and key[1] is not None and key[1] >= minimum_start:
+                        old_total = 0
+                    recent = max(0, total - old_total) if old_total is not None else None
+                    process_times.append([proc.pid, info["name"] or "—", recent, total])
+                except (psutil.AccessDenied, PermissionError):
+                    pass
                 processes.append([proc.pid, info["name"] or "—", info["username"] or "—",
                                   proc.cpu_percent(), info["memory_info"].rss if info["memory_info"] else None,
                                   write, info["status"] or "—"])
             except (psutil.Error, OSError):
                 continue
         self.proc_io = io_cache
+        self.proc_times.append((tick, cpu_times))
         temperatures = [[name, item.label or f"Sensor {i+1}", item.current, item.high, item.critical]
                         for name, items in sorted(psutil.sensors_temperatures().items())
                         for i, item in enumerate(items)]
@@ -638,8 +763,9 @@ class Sampler:
                                         f"{key[0]} unit changed state from {old} to {active}."))
             self.known_services.update(current_services)
             self.next_services = tick + 12
+        cpu_details, self.energy = cpu_sensor_details(cores, self.energy, elapsed)
         gpus, gpu_thermal, gpu_status = self.gpu_metrics
-        return dict(ts=time.time(), cpu_temperature=cpu_temperature(temperatures), cpu=cpu, cores=cores, memory=memory.percent, ram_used=memory.total-memory.available,
+        return dict(ts=time.time(), cpu_details=cpu_details, process_times=process_times, cpu_temperature=cpu_temperature(temperatures), cpu=cpu, cores=cores, memory=memory.percent, ram_used=memory.total-memory.available,
                     ram_total=memory.total, swap=swap.percent, pressure=psi, disk=drives, net=interfaces, gpu=gpus,
                     gpu_status=gpu_status, gpu_thermal=gpu_thermal, drm=drm_metrics(), processes=processes, inventory=self.inventory,
                     mounts=self.mounts, fans=fans,
@@ -1087,6 +1213,9 @@ def run_samples(db, token=None):
                 for event in events:
                     record(db, now, *event)
                 if tick >= next_sample:
+                    if "io.some" in snapshot["pressure"]:
+                        db.execute("INSERT OR REPLACE INTO io_pressure_history VALUES(?,?)",
+                                   (int(now), snapshot["pressure"]["io.some"]))
                     cpu_thermal = snapshot.get("cpu_temperature")
                     db.execute("INSERT OR REPLACE INTO cpu_temperature_history VALUES(?,?)",
                                (int(now), cpu_thermal[0] if cpu_thermal else None))
@@ -1108,6 +1237,7 @@ def run_samples(db, token=None):
                     drop_total = carrier_total = 0
                     next_sample = tick + 15
                 if tick >= next_cleanup:
+                    db.execute("DELETE FROM io_pressure_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM cpu_temperature_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM drive_activity_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM samples WHERE ts < ?", (now-7*86400,))

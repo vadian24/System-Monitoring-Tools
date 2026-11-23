@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Local system telemetry collector and Qt desktop launcher."""
 import argparse
+from collections import deque
 import csv
 import json
 import os
@@ -81,6 +82,7 @@ def initialize(db):
             ts INTEGER PRIMARY KEY, cpu REAL, memory REAL, io_full REAL,
             disk_write REAL, network REAL, disk_read REAL
         );
+        CREATE TABLE IF NOT EXISTS io_pressure_history (ts INTEGER PRIMARY KEY, some REAL);
         CREATE TABLE IF NOT EXISTS drive_activity_history (
             ts INTEGER NOT NULL, device TEXT NOT NULL, read_rate REAL, write_rate REAL,
             PRIMARY KEY(ts, device)
@@ -457,15 +459,14 @@ def nvidia_thermal(executable):
 def windows_cpu_temperature_worker(sampler):
     while not STOP.is_set():
         readings, _ = windows_platform.powershell_json(windows_platform.CPU_TEMPERATURE_SCRIPT, timeout=8)
-        sampler.windows_cpu_temperature = windows_platform.cpu_temperature_reading(readings)
-        STOP.wait(5 if sampler.windows_cpu_temperature else 25)
+        sampler.windows_cpu_temperature, sampler.windows_cpu_details = windows_platform.cpu_sensor_details(readings or {})
+        STOP.wait(5)
 
 
 def windows_disk_worker(sampler):
     while not STOP.is_set():
         rows, _ = windows_platform.powershell_json(windows_platform.DISK_ACTIVITY_SCRIPT, timeout=8)
-        sampler.windows_disk_busy = {f"PhysicalDrive{row['Number']}": max(0, min(100, 100 - row["Idle"]))
-                                     for row in rows or [] if row.get("Idle") is not None}
+        sampler.windows_disk_details = {f"PhysicalDrive{row['Number']}": row for row in rows or []}
         STOP.wait(4)
 
 
@@ -517,6 +518,7 @@ class Sampler:
         self.network_health = NetworkHealth()
         self.psi = {}
         self.proc_io = {}
+        self.proc_times = deque()
         self.inventory = []
         self.mounts = []
         self.services = []
@@ -526,7 +528,8 @@ class Sampler:
         self.windows_inventory = ([("System", "Hardware inventory", "Waiting for Windows hardware information")], [], {})
         self.windows_video_controllers = []
         self.windows_cpu_temperature = None
-        self.windows_disk_busy = {}
+        self.windows_disk_details = {}
+        self.windows_cpu_details = {}
         self.windows_gpu = [], {}, "Checking display adapters"
         if WINDOWS:
             threading.Thread(target=windows_inventory_worker, args=(self,), name="inventory", daemon=True).start()
@@ -562,12 +565,18 @@ class Sampler:
             current, old = disk[name], self.disk.get(name, disk[name])
             writes = max(0, current.write_count - old.write_count)
             busy = min(100, max(0, current.busy_time-old.busy_time)/elapsed/10) if hasattr(current, "busy_time") else None
-            if WINDOWS and busy is None:
-                busy = self.windows_disk_busy.get(name)
+            reads = current.read_count - old.read_count
+            valid = name in self.disk and not gap and reads >= 0 and current.write_count >= old.write_count
+            detail = self.windows_disk_details.get(name, {})
+            if busy is None and detail.get("Idle") is not None:
+                busy = max(0, min(100, 100 - detail["Idle"]))
             drives.append([name, model,
                            max(0, current.read_bytes-old.read_bytes)/elapsed,
                            max(0, current.write_bytes-old.write_bytes)/elapsed,
-                           busy, max(0, current.write_time-old.write_time)/writes if writes else None])
+                           busy, max(0, current.write_time-old.write_time)/writes if writes else None,
+                           reads/elapsed if valid else None, writes/elapsed if valid else None,
+                           (current.read_time-old.read_time)/reads if valid and reads and current.read_time >= old.read_time else None,
+                           detail.get("Queue"), None])
         self.disk = disk
         net = psutil.net_io_counters(pernic=True, nowrap=False) or {}
         interfaces = []
@@ -589,6 +598,13 @@ class Sampler:
         self.net = net
         processes = []
         io_cache = {}
+        cpu_times = {}
+        process_times = []
+        cutoff = tick - 60
+        while len(self.proc_times) > 1 and self.proc_times[1][0] <= cutoff:
+            self.proc_times.popleft()
+        baseline = self.proc_times[0][1] if self.proc_times and self.proc_times[0][0] <= cutoff else None
+        minimum_start = time.time() - 60
         for proc in psutil.process_iter(["pid", "name", "username", "memory_info", "status", "create_time"], ad_value=None):
             try:
                 info = proc.info
@@ -600,12 +616,24 @@ class Sampler:
                     write = max(0, io.write_bytes-old)/elapsed
                 except (psutil.AccessDenied, PermissionError):
                     write = None
+                try:
+                    times = proc.cpu_times()
+                    total = times.user + times.system
+                    cpu_times[key] = total
+                    old_total = baseline.get(key) if baseline is not None else None
+                    if old_total is None and key[1] is not None and key[1] >= minimum_start:
+                        old_total = 0
+                    recent = max(0, total - old_total) if old_total is not None else None
+                    process_times.append([proc.pid, info["name"] or "—", recent, total])
+                except (psutil.AccessDenied, PermissionError):
+                    pass
                 processes.append([proc.pid, info["name"] or "—", info["username"] or "—",
                                   proc.cpu_percent(), info["memory_info"].rss if info["memory_info"] else None,
                                   write, info["status"] or "—"])
             except (psutil.Error, OSError):
                 continue
         self.proc_io = io_cache
+        self.proc_times.append((tick, cpu_times))
         temperature_groups = {} if WINDOWS else psutil.sensors_temperatures()
         fan_groups = {} if WINDOWS else psutil.sensors_fans()
         temperatures = [[name, item.label or f"Sensor {i+1}", item.current, item.high, item.critical]
@@ -636,12 +664,21 @@ class Sampler:
                                         f"{key[0]} unit changed state from {old} to {active}."))
             self.known_services.update(current_services)
             self.next_services = tick + 12
+        cpu_details = dict(self.windows_cpu_details)
+        if not cpu_details.get("cores"):
+            try:
+                frequency = psutil.cpu_freq()
+            except (OSError, psutil.Error, NotImplementedError):
+                frequency = None
+            cpu_details["clock"] = frequency.current if frequency and frequency.current > 0 else None
+            cpu_details["cores"] = [(f"CPU {index}", "Logical", None, percent, None, None)
+                                    for index, percent in enumerate(cores)]
         if WINDOWS:
             gpus, gpu_thermal, gpu_status = self.windows_gpu
         else:
             gpus, gpu_status = gpu()
             gpu_thermal = {}
-        return dict(ts=time.time(), cpu_temperature=self.windows_cpu_temperature if WINDOWS else cpu_temperature(temperatures), cpu=cpu, cores=cores, memory=memory.percent, ram_used=memory.total-memory.available,
+        return dict(ts=time.time(), cpu_details=cpu_details, process_times=process_times, cpu_temperature=self.windows_cpu_temperature if WINDOWS else cpu_temperature(temperatures), cpu=cpu, cores=cores, memory=memory.percent, ram_used=memory.total-memory.available,
                     ram_total=memory.total, swap=swap.percent, pressure=psi, disk=drives, net=interfaces, gpu=gpus,
                     gpu_status=gpu_status, gpu_thermal=gpu_thermal, drm=displays if WINDOWS else drm_metrics(), processes=processes,
                     inventory=hardware if WINDOWS else self.inventory,
@@ -941,6 +978,9 @@ def run_samples(db, token=None):
                 for event in events:
                     record(db, now, *event)
                 if tick >= next_sample:
+                    if "io.some" in snapshot["pressure"]:
+                        db.execute("INSERT OR REPLACE INTO io_pressure_history VALUES(?,?)",
+                                   (int(now), snapshot["pressure"]["io.some"]))
                     cpu_thermal = snapshot.get("cpu_temperature")
                     db.execute("INSERT OR REPLACE INTO cpu_temperature_history VALUES(?,?)",
                                (int(now), cpu_thermal[0] if cpu_thermal else None))
@@ -963,6 +1003,7 @@ def run_samples(db, token=None):
                     drop_total = link_total = 0
                     next_sample = tick + 15
                 if tick >= next_cleanup:
+                    db.execute("DELETE FROM io_pressure_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM cpu_temperature_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM drive_activity_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM samples WHERE ts < ?", (now-7*86400,))

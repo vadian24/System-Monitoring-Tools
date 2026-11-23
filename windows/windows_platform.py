@@ -71,19 +71,25 @@ foreach ($provider in @('LibreHardwareMonitor', 'OpenHardwareMonitor')) {
             ForEach-Object { $_.Identifier })
         if (-not $cpus.Count) { continue }
         $rows = @(Get-CimInstance -Namespace $namespace -ClassName Sensor -OperationTimeoutSec 3 |
-            Where-Object { $_.SensorType -eq 'Temperature' -and $cpus -contains $_.Parent -and $null -ne $_.Value } |
-            ForEach-Object { @{ Name = $_.Name; Value = $_.Value; Provider = $provider } })
+            Where-Object { $cpus -contains $_.Parent -and $null -ne $_.Value } |
+            ForEach-Object { @{ Name = $_.Name; Value = $_.Value; Provider = $provider; Type = $_.SensorType
+                Parent = $_.Parent } })
         if ($rows.Count) { break }
     } catch {}
 }
-ConvertTo-Json -InputObject @($rows | Where-Object { $_ }) -Compress
+$queue = $null
+try {
+    $queue = (Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_System -OperationTimeoutSec 3 |
+        Select-Object -First 1).ProcessorQueueLength
+} catch {}
+ConvertTo-Json -InputObject @{ Sensors = @($rows | Where-Object { $_ }); Queue = $queue } -Depth 3 -Compress
 """
 
 DISK_ACTIVITY_SCRIPT = r"""
 $rows = @(Get-CimInstance -ClassName Win32_PerfFormattedData_PerfDisk_PhysicalDisk -OperationTimeoutSec 4 |
     ForEach-Object {
         if ($_.Name -match '^(\d+)(\s|$)') {
-            @{ Number = [int]$Matches[1]; Idle = $_.PercentIdleTime }
+            @{ Number = [int]$Matches[1]; Idle = $_.PercentIdleTime; Queue = $_.AvgDiskQueueLength }
         }
     })
 ConvertTo-Json -InputObject $rows -Compress
@@ -342,6 +348,41 @@ def cpu_temperature_reading(rows):
         return None
     best = max(primary or valid, key=lambda row: row["Value"])
     return [best["Value"], None, None, f'{best["Provider"]} · {best["Name"]}']
+
+
+def cpu_sensor_details(payload):
+    sensors = payload.get("Sensors") or []
+    details = {"queue": payload.get("Queue"), "queue_label": "threads waiting"}
+    temperatures = [row for row in sensors if row.get("Type") == "Temperature"]
+    package_power = [row["Value"] for row in sensors
+                     if row.get("Type") == "Power" and "package" in row["Name"].lower() and 0 <= row["Value"] <= 2000]
+    volts = [row["Value"] for row in sensors if row.get("Type") == "Voltage"
+             and re.sub(r"[^a-z0-9]", "", row["Name"].lower()) in ("vcore", "cpuvcore") and 0 < row["Value"] <= 5]
+    details.update(watts=sum(package_power) if package_power else None, volts=volts[0] if len(volts) == 1 else None)
+    cores = {}
+    for row in sensors:
+        kind = row.get("Type")
+        match = re.search(r"\bcore\s*#?\s*(\d+)\b", row["Name"], re.I)
+        if kind not in ("Clock", "Temperature", "Load") or not match or "distance" in row["Name"].lower():
+            continue
+        if re.search(r"\b(?:thread|effective)\b", row["Name"], re.I):
+            continue
+        value = row["Value"]
+        if not {"Clock": 0 < value < 10000, "Temperature": 0 < value <= 150,
+                "Load": 0 <= value <= 100}[kind]:
+            continue
+        key = (row.get("Parent"), int(match[1]))
+        entry = cores.setdefault(key, {})
+        entry[kind] = value
+        if "p-core" in row["Name"].lower():
+            entry["type"] = "Performance"
+        elif "e-core" in row["Name"].lower():
+            entry["type"] = "Efficiency"
+    details["cores"] = [(f"Core {core}" if parent in ("", None, "/intelcpu/0", "/amdcpu/0")
+                         else f"{parent} / Core {core}", values.get("type"), values.get("Clock"),
+                         values.get("Load"), values.get("Temperature"), None)
+                        for (parent, core), values in sorted(cores.items(), key=lambda item: (item[0][0] or "", item[0][1]))]
+    return cpu_temperature_reading(temperatures), details
 
 
 def nvidia_tool():

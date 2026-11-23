@@ -31,13 +31,21 @@ Open **Linux System Monitor** from your application launcher. The installer uses
 
 ## What you can see
 
-- **Overview** shows CPU utilization and temperature, RAM, system-wide full I/O pressure, recent faults, and up to seven days of activity charts. GPU charts below System Activity show utilization, temperature, VRAM used (solid) and total (dashed), and power draw. GPU history starts once this version of the collector runs.
+- **Overview** shows CPU utilization and temperature, RAM, system-wide Some and Full I/O pressure, recent faults, and up to seven days of activity charts. GPU charts below System Activity show utilization, temperature, VRAM used (solid) and total (dashed), and power draw. GPU history starts once this version of the collector runs.
 - **Processes** lists visible PIDs, user, CPU, memory, disk writes where the OS permits per-process I/O access, and process state. CPU can exceed 100% when multiple cores are in use.
 - **Services** shows loaded systemd system and user services, sockets and timers, including inactive and failed units. The collector logs observed transitions into and out of failed state.
 - **Hardware** shows CPU cores, PCI and USB devices, motherboard and BIOS data, storage and filesystem utilization, disk throughput and latency, network interfaces, and exported temperatures and fan speeds. GPU readings come from Linux DRM, driver sensors and, for NVIDIA, `nvidia-smi` when available. A display adapter can appear even when its driver does not expose live counters or sensors. Device inventory is refreshed about every 45 seconds.
 - **Events** includes journal warnings and errors, plus specific events such as GPU faults, USB issues, drive timeouts, PCIe hardware errors, sleep and wake, crashes, and resource pressure warnings. Search by message or source, filter by category or severity, select a row for details, or export all matching retained event groups to CSV.
 
 The CPU temperature card prefers a package or die sensor. Its colors use thermal limits reported by that sensor, when available. Temperature history starts with version 1.3.5.
+
+## CPU, I/O, and frame telemetry
+
+Overview adds clock speeds, CPU package power, Vcore, load averages, runnable task count, and the process with the most CPU time over the last 60 seconds. Hardware shows per-core readings and recent plus lifetime CPU time by process. Clock speeds come from CPU frequency reporting. Power comes from readable package energy counters, and temperature headroom requires a reported thermal limit. Vcore requires an explicitly labeled core-voltage sensor.
+
+I/O pressure charts show Full (solid) and Some (dashed). Hardware shows per-drive read and write throughput, completed operations per second, average latency, busy time, average outstanding I/O, and completed TRIM discard requests per second.
+
+In **Frame performance**, select **Open frame capture** and choose a MangoHud or PresentMon CSV. The dashboard reads recent rows as the file is updated. Use a capture targeted to one game. MangoHud typically supplies frame time and GPU load. CPU time per frame is shown when the capture contains that reading. Where the capture lacks GPU utilization, the card shows the current adapter reading explicitly labeled Live.
 
 ## Drive health
 

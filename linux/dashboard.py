@@ -4,8 +4,10 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from functools import lru_cache
 import json
+import math
 from pathlib import Path
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -503,12 +505,97 @@ def probe_loss_level(rows, current):
     return 0
 
 
+def add_card_context(card, text=""):
+    hint = label(text, "muted")
+    hint.setWordWrap(True)
+    card[0].parentWidget().layout().insertWidget(2, hint)
+    return hint
+
+
+def compact_cards(definitions):
+    grid, cards = metric_cards((title, color, None) for title, color in definitions)
+    fields = []
+    for column, (value, chart) in enumerate(cards):
+        chart.hide()
+        value.setStyleSheet(value.styleSheet() + ";font-size:21px;")
+        fields.append((value, add_card_context((value, chart))))
+        grid.setColumnStretch(column, 1)
+    return grid, fields
+
+
+def apply_fields(fields, readings):
+    for (value, caption), (reading, context) in zip(fields, readings):
+        value.setText(reading)
+        caption.setText(context)
+
+
+def number(value, unit="", places=1):
+    return "—" if value is None else f"{value:,.{places}f}{unit}"
+
+
+def clock(value):
+    return number(value / 1000 if value is not None else None, " GHz", 2)
+
+
+def frame_rows(path):
+    # Read the header and a bounded tail so a growing per-frame log stays cheap.
+    with path.open("rb") as stream:
+        start = stream.read(16384)
+        size = stream.seek(0, 2)
+        offset = max(0, size - 2 * 1024 * 1024)
+        stream.seek(offset)
+        tail = stream.read(2 * 1024 * 1024)
+    def fields(lines):
+        return csv.reader(lines.decode("utf-8-sig", "replace").splitlines())
+    aliases = ("frametime", "msbetweenpresents", "cpuframetime")
+    def normalize(text):
+        return "".join(c for c in text.lower() if c.isalnum())
+    headers = next(([normalize(cell) for cell in row] for row in fields(start)
+                    if any(normalize(cell) in aliases for cell in row)), None)
+    if headers is None:
+        return []
+    def numeric(row, keys):
+        for key in keys:
+            try:
+                value = float(row.get(key, ""))
+                if math.isfinite(value) and value >= 0:
+                    return value
+            except ValueError:
+                pass
+        return None
+    if offset:
+        tail = tail.partition(b"\n")[2]
+    rows = []
+    for cells in fields(tail):
+        if len(cells) != len(headers):
+            continue
+        row = dict(zip(headers, cells))
+        frame = numeric(row, aliases)
+        if not frame or frame > 10000:
+            continue
+        cpu = numeric(row, ("mscpubusy", "cpubusy", "cpuframetime"))
+        gpu = numeric(row, ("gpuload", "gpuutilization", "gpuutil"))
+        identity = tuple(row.get(field, "") for field in ("application", "processid", "swapchainaddress"))
+        timestamp = numeric(row, ("timeinseconds", "cpustarttime"))
+        rows.append((identity, timestamp, frame, cpu, gpu if gpu is None or gpu <= 100 else None))
+    if not rows:
+        return []
+    identity = rows[-1][0]
+    rows = [row for row in rows if row[0] == identity]
+    if rows[-1][1] is not None and rows[0][1] is not None and 0 < rows[-1][1] - rows[0][1]:
+        rows = [row for row in rows if row[1] is not None and 0 <= rows[-1][1] - row[1] <= 60]
+    return rows[-300:]
+
+
 class Window(QMainWindow):
     def __init__(self, state, autostart, launcher):
         super().__init__()
         self.state = state
         self.launcher = launcher
         self.snapshot = {}
+        self.frame_capture = None
+        self.frame_signature = None
+        self.frame_samples = []
         self.graph_streaks = {}
         self.drive_activity_cards = {}
         self.settings = {}
@@ -610,10 +697,11 @@ class Window(QMainWindow):
             ("CPU temperature", COLORS[3], None),
             ("RAM in use", COLORS[1], 100),
         )
-        system_metrics += (("Full I/O pressure", COLORS[2], 100),)
+        system_metrics += (("I/O pressure", COLORS[2], 100),)
         cards, (cpu, self.cpu_temperature_card, *rest) = metric_cards(system_metrics)
         self.system_cards = [cpu, *rest]
         layout.addLayout(cards)
+        self.add_overview_telemetry(layout)
         self.add_drive_health(layout)
         gpu_header = QHBoxLayout()
         gpu_header.addWidget(label("GPU activity", "section"))
@@ -650,6 +738,169 @@ class Window(QMainWindow):
         table.setMinimumHeight(155)
         layout.addWidget(table, 1)
         table.doubleClicked.connect(lambda _: self.tabs.setCurrentIndex(4))
+
+    def add_overview_telemetry(self, layout):
+        self.cpu_context = add_card_context(self.system_cards[0])
+        self.temp_context = add_card_context(self.cpu_temperature_card)
+        self.ram_context = add_card_context(self.system_cards[1])
+        self.io_context = add_card_context(self.system_cards[2]) if len(self.system_cards) > 2 else None
+        self.disk_overview = None
+        if self.io_context is not None:
+            _, chart = self.system_cards[2]
+            chart.reference_color = QColor(COLORS[0])
+            chart.setToolTip("Solid: Full, all non-idle tasks stalled. Dashed: Some, at least one task stalled.")
+        layout.addWidget(label("CPU details", "section"))
+        cards, self.cpu_overview = compact_cards(zip(
+            ("Core clocks", "CPU package power", "Load average & run queue", "CPU time · last 60 s"),
+            (COLORS[0], COLORS[3], COLORS[1], COLORS[2])))
+        layout.addLayout(cards)
+        self.add_frame_section(layout, hardware=False)
+
+    def add_frame_section(self, layout, *, hardware):
+        bar = QHBoxLayout()
+        bar.addWidget(label("Frame performance", "section"))
+        bar.addStretch()
+        status = label("", "muted")
+        status.setWordWrap(True)
+        bar.addWidget(status)
+        open_csv = QPushButton("Open frame capture")
+        open_csv.clicked.connect(self.select_frame_capture)
+        bar.addWidget(open_csv)
+        layout.addLayout(bar)
+        definitions = (("Frame time", COLORS[0]), ("CPU time per frame", COLORS[1]), ("GPU utilization", COLORS[2]))
+        if hardware:
+            grid, self.frame_charts = metric_cards((title, color, None) for title, color in definitions)
+            self.frame_hardware = [(card[0], add_card_context(card)) for card in self.frame_charts]
+            self.frame_hardware_status = status
+        else:
+            grid, self.frame_overview = compact_cards(definitions)
+            self.frame_overview_status = status
+        layout.addLayout(grid)
+
+    def select_frame_capture(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Open frame capture", "", "CSV files (*.csv)")
+        if filename:
+            self.frame_capture = Path(filename)
+            self.frame_signature = None
+            self.show_frame_capture()
+
+    def show_frame_capture(self):
+        capture, points = self.frame_capture, self.frame_samples
+        if capture is not None:
+            try:
+                state = capture.stat()
+                if not stat.S_ISREG(state.st_mode):
+                    raise OSError("Expected a regular CSV file")
+                signature = (state.st_mtime_ns, state.st_size)
+                if signature != self.frame_signature:
+                    points = self.frame_samples = frame_rows(capture)
+                    self.frame_signature = signature
+            except (OSError, csv.Error):
+                points = []
+                self.frame_signature = None
+        latest = points[-1] if points else ((), None, None, None, None)
+        gpu = self.snapshot.get("gpu", [])
+        current_gpu = next((row for row in gpu if row[0] == getattr(self, "selected_gpu", None)), gpu[0] if gpu else None)
+        gpu_value = latest[4] if latest[4] is not None else current_gpu[2] if current_gpu else None
+        values = [
+            (number(latest[2], " ms"), "From frame capture"),
+            (number(latest[3], " ms"), "CPU timing, when reported by capture"),
+            (percent(gpu_value), "From frame capture" if latest[4] is not None else
+             f"Live · {current_gpu[0]}" if current_gpu else "GPU utilization unavailable"),
+        ]
+        for fields, status in ((self.frame_overview, self.frame_overview_status),
+                               (self.frame_hardware, self.frame_hardware_status)):
+            apply_fields(fields, values)
+            status.setText((latest[0][0] or capture.name) if points else
+                           "No compatible samples" if capture else "MangoHud or PresentMon CSV")
+        for column, (_, chart) in enumerate(self.frame_charts, 2):
+            chart.set_values([(index, row[column]) for index, row in enumerate(points)])
+
+    def add_hardware_telemetry(self, layout):
+        layout.addWidget(label("CPU package", "section"))
+        cards, self.cpu_hardware = compact_cards(zip(
+            ("CPU temperature", "Package power", "Core voltage", "Load average & run queue"),
+            (COLORS[3], COLORS[2], COLORS[0], COLORS[1])))
+        layout.addLayout(cards)
+        layout.addWidget(label("Per-core telemetry", "section"))
+        table, self.core_telemetry = make_table(
+            ["Core", "Type", "Clock", "Utilization", "Temperature", "Thermal headroom"],
+            {2: clock, 3: percent, 4: celsius, 5: celsius}, widths=[132, 130, 124, 110, 110])
+        table.setMinimumHeight(204)
+        layout.addWidget(table)
+        self.add_frame_section(layout, hardware=True)
+        layout.addWidget(label("CPU time by process", "section"))
+        table, self.cpu_time_model = make_table(
+            ["PID", "Process", "CPU time · last 60 s", "Cumulative CPU time"],
+            {2: lambda x: number(x, " s"), 3: lambda x: number(x, " s")}, 2, True, [90, 325, 200])
+        table.setMinimumHeight(181)
+        layout.addWidget(table)
+
+    def show_cpu_details(self):
+        snapshot = self.snapshot
+        details = snapshot.get("cpu_details", {})
+        cores = details.get("cores", [])
+        top = max((row for row in snapshot.get("process_times", []) if row[2] is not None),
+                  key=lambda row: row[2], default=None)
+        temp, _, limit, _ = snapshot.get("cpu_temperature") or (None, None, None, "")
+        thermal = (f"{celsius(limit - temp)} headroom · limit {celsius(limit)}"
+                   if limit is not None and temp is not None else "Thermal limit not reported")
+        volts = details.get("volts")
+        voltage = number(volts, " V", 3)
+        watts = number(details.get("watts"), " W")
+        averages = details.get("load")
+        queue = details.get("queue")
+        load = " / ".join(f"{v:.2f}" for v in averages) if averages else "—"
+        queue_value = (f"{queue} {details.get('queue_label', 'runnable tasks')}"
+                       if queue is not None else "Queue unavailable")
+        load_value = (load, "1 / 5 / 15 min · " + queue_value) if averages else (
+            str(queue) if queue is not None else "—", details.get("queue_label", "Load data unavailable"))
+        peaks = [max((row[2] for row in cores if row[1] == kind and row[2] is not None), default=None)
+                 for kind in ("Performance", "Efficiency")]
+        fastest = max((row[2] for row in cores if row[2] is not None), default=None)
+        clocks = ((f"{clock(peaks[0])} / {clock(peaks[1])}", "P-core / E-core peak")
+                  if all(value is not None for value in peaks) else
+                  (clock(fastest), "Fastest core in current sample") if fastest is not None else
+                  (clock(details.get("clock")),
+                   "System clock estimate" if details.get("clock") else "Clock sensor unavailable"))
+        apply_fields(self.cpu_overview, [
+            clocks, (watts, f"Vcore · {voltage}" if volts is not None else "Vcore · Not reported"),
+            load_value, (number(top[2], " s"), top[1]) if top else ("—", "Waiting for CPU time history"),
+        ])
+        apply_fields(self.cpu_hardware, [
+            (celsius(temp), thermal), (watts, "CPU package power"), (voltage, "Vcore sensor"),
+            load_value,
+        ])
+        self.cpu_context.setText(f"{len(snapshot['cores'])} logical CPUs" if snapshot.get("cores") else "")
+        self.temp_context.setText(thermal)
+        self.ram_context.setText(f"{size(snapshot['ram_used'])} / {size(snapshot['ram_total'])}"
+                                 if "ram_used" in snapshot and "ram_total" in snapshot else "")
+        self.core_telemetry.set_rows(cores or [(f"CPU {i}", "Logical", None, value, None, None)
+                                               for i, value in enumerate(snapshot.get("cores", []))])
+        self.cpu_time_model.set_rows(sorted(snapshot.get("process_times", []),
+                                            key=lambda row: (row[2] is not None, row[2] or 0), reverse=True)[:20])
+        self.show_frame_capture()
+
+    def show_io_summary(self):
+        if self.io_context is None and self.disk_overview is None:
+            return
+        pressure = self.snapshot.get("pressure", {})
+        disk = max((row for row in self.snapshot.get("disk", []) if row[4] is not None),
+                   key=lambda row: (row[4], row[10] or 0 if len(row) > 10 else 0), default=None)
+        if disk is None:
+            device = "Drive activity unavailable"
+        else:
+            disk_name = next((drive["volume_names"][0] for drive in self.snapshot.get("drive_health") or []
+                              if Path(drive["device"]).name == disk[0] and drive.get("volume_names")), disk[0])
+            device = f"{disk_name} · {disk[4]:.0f}% busy"
+            if len(disk) > 10 and disk[10] and disk[10] > 0:
+                device += " · TRIM active"
+        if self.io_context is not None:
+            self.io_context.setText(f"Some {percent(pressure.get('io.some'))} · Full {percent(pressure.get('io.full'))}\n{device}")
+        if self.disk_overview is not None:
+            value, caption = self.disk_overview
+            value.setText(percent(disk[4]) if disk else "—")
+            caption.setText(f"{disk[1]} · busiest drive" if disk else device)
 
     def processes(self):
         layout = self.add_page("Processes")
@@ -688,6 +939,7 @@ class Window(QMainWindow):
         inner = QWidget(objectName="scrollBody")
         body = QVBoxLayout(inner)
         body.setContentsMargins(0, 0, 8, 0)
+        self.add_hardware_telemetry(body)
         self.gpu_caption = label("Checking GPU telemetry…", "muted")
         self.gpu_caption.setWordWrap(True)
         self.hw_models = {}
@@ -696,22 +948,32 @@ class Window(QMainWindow):
              {2: percent, 3: celsius, 4: lambda x: f"{x:g} MiB", 5: lambda x: f"{x:g} MiB", 6: lambda x: f"{x:g} W"}),
             ("Display adapters", "drm", ["Card", "Vendor", "PCI address", "Utilization", "Clock"],
              {3: percent, 4: lambda x: f"{x:,} MHz"}),
-            ("Storage activity", "disk", ["Device", "Model", "Read", "Write", "Busy", "Avg. write latency"],
-             {2: rate, 3: rate, 4: percent, 5: lambda x: f"{x:.2f} ms"}),
+            ("Storage activity", "disk",
+             ["Device", "Model", "Read", "Write", "Busy", "Write latency", "Read IOPS", "Write IOPS",
+              "Read latency", "Avg. queue", "TRIM / s"],
+             {2: rate, 3: rate, 4: percent, 5: lambda x: number(x, " ms", 2),
+              6: number, 7: number, 8: lambda x: number(x, " ms", 2), 9: number, 10: number}),
             ("Filesystems", "mounts", ["Mount", "Device", "Format", "Space used", "Free"], {3: percent, 4: size}),
             ("Network interfaces", "net", ["Interface", "Link", "Receive", "Send", "New errors / sample"], {2: rate, 3: rate}),
             ("Temperature sensors", "temperatures", ["Driver", "Sensor", "Current", "High", "Critical"],
              {2: celsius, 3: celsius, 4: celsius}),
             ("Fans", "fans", ["Driver", "Sensor", "Speed"], {2: lambda x: f"{x:,} RPM"}),
-            ("Logical CPU cores", "cores", ["Core", "Utilization"], {1: percent}),
+            ("Logical CPU threads", "cores", ["CPU", "Utilization"], {1: percent}),
             ("Hardware inventory", "inventory", ["Group", "Device", "Details"], {}),
         ]
         for title, key, headers, formats in data:
             body.addWidget(label(title, "section"))
             if key == "gpu":
                 body.addWidget(self.gpu_caption)
-            table, model = make_table(headers, formats, widths=[170, 230] if key in ("gpu", "inventory") else None)
-            table.setMinimumHeight(250 if key in ("temperatures", "inventory") else 120)
+            widths = ([95, 205, 103, 103, 75, 106, 92, 92, 98, 90]
+                      if key == "disk" else [170, 230] if key in ("gpu", "inventory") else None)
+            table, model = make_table(headers, formats, widths=widths)
+            if key == "disk":
+                table.setMinimumHeight(171)
+                table.setToolTip("Latencies are averages per completed request. Avg. queue includes outstanding work. "
+                                 "TRIM counts completed discard requests and may be unavailable on Windows.")
+            if key != "disk":
+                table.setMinimumHeight(250 if key in ("temperatures", "inventory") else 120)
             body.addWidget(table)
             self.hw_models[key] = model
         scroller.setWidget(inner)
@@ -1262,6 +1524,7 @@ class Window(QMainWindow):
         self.refresh_drive_activity()
         s = self.snapshot
         self.show_cpu_temperature()
+        self.show_io_summary()
         if s:
             readings = ((s.get("cpu"), 80, 95), (s.get("memory"), 85, 95),
                         (s.get("pressure", {}).get("io.full"), 5, 50))
@@ -1278,6 +1541,7 @@ class Window(QMainWindow):
             self.coverage.setText(f"{s['scope']}  •  Kernel journal {self.settings.get('kernel_journal', 'checking').lower()}"
                                   f"  •  GPU telemetry {'available' if any(any(value is not None for value in row[2:]) for row in s['gpu']) else 'unavailable'}"
                                   f"  •  RAM {size(s['ram_used'])} / {size(s['ram_total'])}  •  Swap {percent(s['swap'])}{alerts}")
+        self.show_cpu_details()
         if time.monotonic() - self.history_tick > 12:
             self.refresh_history()
         try:
@@ -1314,6 +1578,14 @@ class Window(QMainWindow):
             rows = []
         for column, (_, chart) in enumerate(self.system_cards, 1):
             chart.set_values([(row[0], row[column]) for row in rows])
+        if self.io_context is not None:
+            try:
+                with database(True) as db:
+                    some = db.execute("SELECT ts,some FROM io_pressure_history WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
+            except sqlite3.Error:
+                some = []
+            chart = self.system_cards[2][1]
+            chart.set_values(chart.points, [tuple(row) for row in some])
         try:
             with database(True) as db:
                 temperatures = db.execute(
@@ -1431,10 +1703,15 @@ class Window(QMainWindow):
                                  f"  •  User manager {self.snapshot.get('user_status', 'checking')}")
 
     def show_hardware(self):
+        self.show_cpu_details()
         self.gpu_caption.setText(f"GPU telemetry · {self.snapshot.get('gpu_status', 'Checking')}")
         for key, model in self.hw_models.items():
             rows = self.snapshot.get(key, [])
-            model.set_rows(enumerate(rows) if key == "cores" else rows)
+            if key == "disk":
+                rows = [list(row) + [None] * (11 - len(row)) for row in rows]
+            elif key == "cores":
+                rows = enumerate(rows)
+            model.set_rows(rows)
 
     def event_query(self, limit):
         where = []
