@@ -95,10 +95,14 @@ try {
 }
 $volumesByDisk = @{}
 $volumeOwners = @{}
+$systemLetter = ([string]$env:SystemDrive).TrimEnd(':')
 try {
     Get-Partition | ForEach-Object {
         $number = [int]$_.DiskNumber
         if ($rows.ContainsKey($number)) {
+            if ($systemLetter -and [string]$_.DriveLetter -eq $systemLetter) {
+                $rows[$number].System = $true
+            }
             $volume = $_ | Get-Volume -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($volume -and $volume.UniqueId -and $volume.Size -gt 0 -and $null -ne $volume.SizeRemaining) {
                 $key = $volume.UniqueId

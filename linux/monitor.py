@@ -764,21 +764,25 @@ def drive_health_events(rows, last):
 
 
 def mounted_volume_space(nodes, group, owners, volumes):
+    hosts_root = False
     for node in nodes:
         identity = node.get("uuid") or node["name"]
         owners.setdefault(identity, set()).add(group)
         used, available = node.get("fsused"), node.get("fsavail")
         if used is not None and available is not None:
             volumes[identity] = (used, available)
-        mounted_volume_space(node.get("children") or [], group, owners, volumes)
+        child_hosts_root = mounted_volume_space(node.get("children") or [], group, owners, volumes)
+        hosts_root = hosts_root or child_hosts_root or "/" in (node.get("mountpoints") or [])
+    return hosts_root
 
 
 def drive_inventory():
-    fields = "NAME,TYPE,MODEL,TRAN,ROTA,SERIAL,UUID,FSUSED,FSAVAIL"
+    fields = "NAME,TYPE,MODEL,TRAN,ROTA,SERIAL,UUID,FSUSED,FSAVAIL,MOUNTPOINTS"
     result, code, _ = command(["lsblk", "--json", "--bytes", "--output", fields])
     if code:
         return None
     drives, owners, volumes = {}, {}, {}
+    system_groups = set()
     for disk in json.loads(result).get("blockdevices", []):
         name = disk["name"]
         if disk["type"] != "disk" or not re.fullmatch(r"[A-Za-z0-9_-]+", name) or name.startswith(("ram", "zram")):
@@ -791,12 +795,13 @@ def drive_inventory():
         kind = "NVMe" if controller else "USB" if disk.get("tran") == "usb" else "HDD" if disk.get("rota") else "SSD / flash"
         drives.setdefault(group, {"id": identity, "name": (disk.get("model") or name).strip(),
                                   "kind": kind, "device": device})
-        mounted_volume_space([disk], group, owners, volumes)
+        if mounted_volume_space([disk], group, owners, volumes):
+            system_groups.add(group)
     for group, drive in drives.items():
         filesystems = [space for key, space in volumes.items() if owners[key] == {group}]
         if filesystems:
             drive["space"] = tuple(map(sum, zip(*filesystems)))
-    return list(drives.values())
+    return [drives[group] for group in sorted(drives, key=lambda group: group not in system_groups)]
 
 
 def udisks_drive(drive):

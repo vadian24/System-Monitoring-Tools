@@ -772,6 +772,7 @@ def drive_inventory():
     data, _ = windows_platform.powershell_json(windows_platform.DRIVE_INVENTORY_SCRIPT, timeout=8)
     if not isinstance(data, list):
         return None
+    data.sort(key=lambda row: not row.get("System"))
     return [{"id": f"{row['Number']}:{row.get('Identity') or row.get('Name') or ''}",
              "number": row["Number"], "device": f"Disk {row['Number']}",
              "name": row.get("Name") or f"Disk {row['Number']}",
