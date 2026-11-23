@@ -50,7 +50,7 @@ I/O pressure charts show Full (solid) and Some (dashed). Hardware shows per-driv
 Overview shows two compact cards when a supported foreground source is reporting: **Live FPS** and **Dropped frames** over the last 60 seconds. The cards hide when the source is no longer active. MangoHud supplies FPS and does not report dropped frames to the monitor.
 
 - **Games on KDE Plasma:** Install MangoHud if needed. Choose **Live FPS setup → Copy MangoHud launch option**, paste it into that game's Steam Launch Options, then restart the game. Outside Steam, use the same launcher path followed by the game command in place of `%command%`. The monitor uses a temporary KWin script to identify the active window and reads the MangoHud log from that game session.
-- **Twitch and YouTube:** Install and pair the [System Monitor Video FPS add-on](../browser-extension/README.md) for a Chromium browser. Focus the playing video tab. The pairing code works across app restarts until you select **Disable video FPS**.
+- **Twitch and YouTube:** Open **Overview → Live FPS setup → Browser video**. The guide shows the bundled add-on ZIP in the monitor's `add-ons` folder and walks through extraction, loading, and pairing in a Chromium browser. Focus the playing video tab after setup. The pairing code works across app restarts until you select **Disable video FPS**. See the [browser add-on guide](../browser-extension/README.md) for more details.
 
 
 ## Drive health

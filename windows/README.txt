@@ -78,10 +78,10 @@ Live FPS setup > Select PresentMon console EXE and point to that console
 executable. A game that emits supported presentation events will begin
 reporting when its window has focus.
 
-For Twitch and YouTube, install the System Monitor Video FPS add-on in
-a Chromium browser. See browser-extension/README.md in the GitHub
-repository for installation and pairing. Only the local monitor receives
-the site label and frame counters.
+For Twitch and YouTube, use the Browser video tab in Live FPS setup.
+It opens the folder containing the bundled add-on ZIP and walks through
+loading and pairing the add-on in a Chromium browser. Only the local
+monitor receives the site label and frame counters.
 
 
 Dashboard updates

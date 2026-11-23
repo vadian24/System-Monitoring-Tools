@@ -72,6 +72,10 @@ def apply_files():
             raise
         else:
             shutil.rmtree(stage, ignore_errors=True)
+            try:
+                updater.install_browser_addon(state)
+            except OSError as error:
+                print(f"Could not save the browser add-on: {error}", file=sys.stderr)
 
 
 def install(startup):

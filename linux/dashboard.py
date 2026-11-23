@@ -21,7 +21,7 @@ import time
 
 from PySide6.QtCore import QAbstractTableModel, QLocale, QModelIndex, QRectF, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGridLayout,
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPushButton, QPlainTextEdit, QScrollArea, QSizePolicy,
                                QTabWidget, QTableView, QVBoxLayout, QWidget)
@@ -811,12 +811,8 @@ class LiveFrameSources:
             self.video = None
         self.video_error = ""
 
-    game_button = "Copy MangoHud launch option"
-
-    def help_text(self):
-        return ("Browser video requires the System Monitor Video FPS extension for Chromium browsers. "
-                "For games, copy the MangoHud launch option into Steam. Game focus tracking uses KDE Plasma. "
-                + self.video_error + " " + self.game_error)
+    def game_status(self):
+        return self.game_error or ("MangoHud tracking enabled." if self.game else "Game FPS is disabled.")
 
     def start_game(self):
         if self.config.get("game") and self.game is None:
@@ -851,6 +847,154 @@ class LiveFrameSources:
         if self.game:
             self.game.close()
 
+
+
+class LiveFPSSetup(QDialog):
+    def __init__(self, parent, sources, game_details, choose_game):
+        super().__init__(parent)
+        self.setWindowTitle("Live FPS Setup")
+        self.setObjectName("base")
+        self.resize(760, 555)
+        self.setMinimumSize(515, 380)
+        self.sources = sources
+        self.choose_game = choose_game
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 14, 18, 14)
+        intro = label("Choose a source for live FPS and dropped frames.", "section")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        tabs = QTabWidget()
+        outer.addWidget(tabs, 1)
+        video, video_layout = self.page([
+            ("Find the add-on ZIP", "Click <b>Open add-on folder</b>. Extract "
+             "<b>System-Monitor-Video-FPS.zip</b> to a folder you can keep."),
+            ("Load the extracted folder", "Open the Extensions page in Vivaldi, Chrome, Edge, or Brave. "
+             "For example, use <b>vivaldi://extensions</b> in Vivaldi or <b>chrome://extensions</b> in Chrome. "
+             "Turn on <b>Developer mode</b>, click <b>Load unpacked</b>, and choose the folder containing "
+             "<b>manifest.json</b>. Keep that extracted folder after loading it."),
+            ("Pair it with System Monitor", "Click <b>Copy video pairing code</b> below. Open the "
+             "<b>System Monitor Video FPS</b> add-on from the browser's Extensions menu, paste the code, "
+             "then click <b>Pair</b>. Reload any Twitch or YouTube tab that was already open."),
+            ("Watch a video", "Play a Twitch stream or YouTube video and keep that browser tab in the foreground. "
+             "The Overview cards appear when readings arrive. Keep the dashboard visible on another display "
+             "if you want to watch the readings without moving focus."),
+        ])
+        tabs.addTab(video, "Browser video")
+        self.zip_path = QLineEdit()
+        self.zip_path.setReadOnly(True)
+        self.zip_path.setText(str(sources.state / "add-ons" / updater.BROWSER_ADDON_NAME))
+        self.zip_path.setAccessibleName("Local browser add-on ZIP path")
+        video_layout.addWidget(self.zip_path)
+        open_folder = QPushButton("Open add-on folder")
+        open_folder.setToolTip("Open the folder containing the browser add-on ZIP bundled with this update.")
+        open_folder.clicked.connect(self.open_addon)
+        pair = QPushButton("Copy video pairing code")
+        pair.setToolTip("Enable browser video readings and copy the code to paste into the add-on.")
+        pair.clicked.connect(self.pair_video)
+        self.disable_video = QPushButton("Disable video FPS")
+        self.disable_video.clicked.connect(self.stop_video)
+        self.video_status = self.actions(video_layout, (open_folder, pair, self.disable_video))
+
+        game, game_layout = self.page(game_details["steps"])
+        tabs.addTab(game, game_details["tab"])
+        game_button = QPushButton(game_details["button"])
+        game_button.setToolTip(game_details["tooltip"])
+        game_button.clicked.connect(self.setup_game)
+        self.disable_game = QPushButton("Disable game FPS")
+        self.disable_game.clicked.connect(self.stop_game)
+        buttons = [game_button, self.disable_game]
+        if game_details.get("download"):
+            download = QPushButton("Open PresentMon downloads")
+            download.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(game_details["download"])))
+            buttons.insert(0, download)
+        self.game_status = self.actions(game_layout, buttons)
+        close = QPushButton("Done")
+        close.clicked.connect(self.accept)
+        footer = QHBoxLayout()
+        footer.addStretch()
+        footer.addWidget(close)
+        outer.addLayout(footer)
+        self.refresh_status()
+        close.setFocus()
+
+    def page(self, steps):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        scroll = QScrollArea(widgetResizable=True)
+        body = QWidget(objectName="scrollBody")
+        instructions = QVBoxLayout(body)
+        instructions.setContentsMargins(12, 8, 14, 8)
+        instructions.setSpacing(5)
+        for number, (title, description) in enumerate(steps, 1):
+            instructions.addWidget(label(f"{number}. {title}", "metricTitle"))
+            detail = QLabel(description)
+            detail.setTextFormat(Qt.TextFormat.RichText)
+            detail.setWordWrap(True)
+            detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            instructions.addWidget(detail)
+            instructions.addSpacing(7)
+        instructions.addStretch()
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+        return page, layout
+
+    def actions(self, layout, buttons):
+        row = QHBoxLayout()
+        for button in buttons:
+            row.addWidget(button)
+        row.addStretch()
+        layout.addLayout(row)
+        status = label("", "muted")
+        status.setWordWrap(True)
+        layout.addWidget(status)
+        return status
+
+    def refresh_status(self, video_message="", game_message=""):
+        sources = self.sources
+        self.disable_video.setEnabled(bool(sources.config.get("video_key")))
+        self.disable_game.setEnabled(bool(sources.config.get("game")))
+        self.video_status.setText(video_message or sources.video_error or
+                                  ("Pairing enabled. Load the add-on and paste your code."
+                                   if sources.config.get("video_key") else "Browser video FPS is disabled."))
+        self.game_status.setText(game_message or sources.game_status())
+
+    def open_addon(self):
+        try:
+            path = updater.install_browser_addon(self.sources.state)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent))):
+                raise OSError("Could not open the add-on folder. Use the ZIP path shown above.")
+            self.refresh_status(video_message="Extract the ZIP, then load the folder containing manifest.json.")
+        except OSError as error:
+            self.refresh_status(video_message=str(error))
+
+    def pair_video(self):
+        try:
+            QApplication.clipboard().setText(self.sources.pair_video())
+            self.refresh_status(video_message="Code copied. Paste it into the browser add-on and click Pair.")
+        except OSError as error:
+            self.refresh_status(video_message=str(error))
+
+    def setup_game(self):
+        try:
+            message = self.choose_game()
+            self.refresh_status(game_message=message or "")
+        except OSError as error:
+            self.refresh_status(game_message=str(error))
+
+    def stop_video(self):
+        try:
+            self.sources.stop_video()
+            self.refresh_status(video_message="Browser video FPS disabled. The old pairing code has expired.")
+        except OSError as error:
+            self.refresh_status(video_message=str(error))
+
+    def stop_game(self):
+        try:
+            self.sources.stop_game()
+            self.refresh_status()
+        except OSError as error:
+            self.refresh_status(game_message=str(error))
 
 
 class Window(QMainWindow):
@@ -930,7 +1074,7 @@ class Window(QMainWindow):
         self.fps_timer = QTimer(self, interval=750)
         self.fps_timer.timeout.connect(self.show_live_frames)
         self.fps_timer.start()
-        QTimer.singleShot(0, self.live_frames.start)
+        QTimer.singleShot(0, self.prepare_live_frames)
         self.refresh()
 
     def add_page(self, name, scrollable=False):
@@ -1048,43 +1192,38 @@ class Window(QMainWindow):
                 ("Unavailable" if drops is None else f"{drops:,}", f"{source} · last 60 s"),
             ])
 
-    def configure_live_frames(self):
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle("Live FPS setup")
-        dialog.setText("Connect a source for live FPS and dropped frames.")
-        dialog.setTextFormat(Qt.TextFormat.PlainText)
-        dialog.setInformativeText(self.live_frames.help_text())
-        browser = dialog.addButton("Copy video pairing code", QMessageBox.ButtonRole.ActionRole)
-        game = dialog.addButton(self.live_frames.game_button, QMessageBox.ButtonRole.ActionRole)
-        disable_video = None
-        disable_game = None
-        if self.live_frames.config.get("video_key"):
-            disable_video = dialog.addButton("Disable video FPS", QMessageBox.ButtonRole.ActionRole)
-        if self.live_frames.config.get("game"):
-            disable_game = dialog.addButton("Disable game FPS", QMessageBox.ButtonRole.ActionRole)
-        dialog.addButton(QMessageBox.StandardButton.Close)
-        dialog.exec()
-        selected = dialog.clickedButton()
+    def prepare_live_frames(self):
         try:
-            if selected is browser:
-                QApplication.clipboard().setText(self.live_frames.pair_video())
-                QMessageBox.information(self, "Video pairing code copied",
-                                        "Paste the code in the System Monitor Video FPS browser extension and reload the video tab.")
-            elif selected is game:
-                self.configure_game_frames()
-            elif disable_video is not None and selected is disable_video:
-                self.live_frames.stop_video()
-            elif disable_game is not None and selected is disable_game:
-                self.live_frames.stop_game()
-            self.show_live_frames()
-        except OSError as error:
-            QMessageBox.warning(self, "Live FPS setup", str(error))
+            updater.install_browser_addon(self.state)
+        except OSError:
+            # The setup guide retries and displays the file error when opened.
+            pass
+        self.live_frames.start()
 
+    def configure_live_frames(self):
+        guide = {
+            "tab": "Linux games · MangoHud",
+            "button": "Copy MangoHud launch option",
+            "tooltip": "Copy the launch option to paste into the game's Steam properties.",
+            "steps": [
+                ("Check MangoHud on KDE Plasma", "Open Konsole and run <b>mangohud --version</b>. "
+                 "If it is missing on Nobara or Fedora, run <b>sudo dnf install mangohud</b>. "
+                 "Automatic game tracking requires a KDE Plasma session."),
+                ("Set the game's launch option", "Click <b>Copy MangoHud launch option</b> below. "
+                 "In Steam, right-click the game in <b>Library</b>, choose <b>Properties → General</b>, "
+                 "and paste the copied text into <b>Launch Options</b>. For a non-Steam game, use the "
+                 "copied launcher path followed by the game command in place of <b>%command%</b>."),
+                ("Restart the game and switch to it", "Launch the game after saving the option and keep "
+                 "its window in the foreground. Overview displays its live FPS. MangoHud supplies FPS "
+                 "for this integration, so the dropped-frames value is marked <b>Unavailable</b>."),
+            ],
+        }
+        LiveFPSSetup(self, self.live_frames, guide, self.configure_game_frames).exec()
+        self.show_live_frames()
 
     def configure_game_frames(self):
         QApplication.clipboard().setText(self.live_frames.enable_game())
-        QMessageBox.information(self, "MangoHud launch option copied",
-                                "Paste it into the game's Steam Launch Options and restart the game.")
+        return "Launch option copied. Paste it into Steam and restart the game."
 
     def add_hardware_telemetry(self, layout):
         layout.addWidget(label("CPU package", "section"))
