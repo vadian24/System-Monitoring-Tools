@@ -570,49 +570,70 @@ def presentmon_frame(row):
         return None
 
 
-class ForegroundFrames:
+# Desktop and browser processes can emit presentation events of their own.
+NON_GAME_APPS = frozenset({
+    "applicationframehost.exe", "brave.exe", "chrome.exe", "dwm.exe", "explorer.exe", "firefox.exe",
+    "msedge.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe",
+    "steamwebhelper.exe", "vivaldi.exe", "windowsterminal.exe",
+})
+
+
+class PresentationFrames:
     def __init__(self):
         self.lock = threading.Lock()
-        self.pid = 0
+        self.selected_pid = None
         self.chains = {}
 
-    def select(self, pid):
-        with self.lock:
-            if pid != self.pid:
-                self.pid = pid
-                self.chains.clear()
-
     def capture(self, frame, now):
-        pid, identity, name, frame_time, dropped = frame
+        pid, identity, name, interval_ms, dropped = frame
+        if pid <= 0 or pid == os.getpid() or name.casefold() in NON_GAME_APPS:
+            return
+        key = pid, identity
         with self.lock:
-            if not pid or pid != self.pid:
-                return
-            if identity not in self.chains and len(self.chains) >= 16:
-                del self.chains[min(self.chains, key=lambda key: self.chains[key][1][-1][0])]
-            _, records = self.chains.setdefault(identity, (name, deque(maxlen=66000)))
-            records.append((now, frame_time, dropped))
-            while records[0][0] <= now - 60:
-                records.popleft()
+            if key not in self.chains:
+                if len(self.chains) >= 48:
+                    # Prefer to evict a stale chain outside the game being displayed.
+                    oldest = min(self.chains, key=lambda chain: (chain[0] == self.selected_pid, self.chains[chain][1]))
+                    del self.chains[oldest]
+                self.chains[key] = name, now, deque(maxlen=61)
+            name, _, history = self.chains[key]
+            self.chains[key] = name, now, history
+            second = int(now)
+            if not history or history[-1][0] != second:
+                history.append([second, 0, 0.0, 0, 0])
+            bucket = history[-1]
+            bucket[1] += 1
+            bucket[2] += interval_ms
+            bucket[3] += dropped is True
+            bucket[4] += dropped is None
 
-    def reading(self, now):
+    def reading(self, now, foreground):
         with self.lock:
-            options = [(name, records, sum(1 for timestamp, _, _ in records if timestamp > now - 1))
-                       for name, records in self.chains.values() if now - records[-1][0] <= 1.5]
-            if not options:
-                return None
-            name, records, _ = max(options, key=lambda row: (row[2], len(row[1])))
-            recent = [(elapsed, dropped) for timestamp, elapsed, dropped in records if timestamp > now - 1.5]
-            if len(recent) < 2:
-                return None
-            fps = 1000 * sum(dropped is not True for _, dropped in recent) / sum(elapsed for elapsed, _ in recent)
-            drops = (sum(dropped is True for timestamp, _, dropped in records if timestamp > now - 60)
-                     if all(dropped is not None for _, dropped in recent) else None)
-            return name[:90], fps, drops
+            recent = {}
+            for (pid, _), (name, stamp, history) in self.chains.items():
+                if now - stamp > 2.75:
+                    continue
+                blocks = [item for item in reversed(history) if now - item[0] < 2]
+                frames = sum(item[1] for item in blocks)
+                if frames < 2:
+                    continue
+                ratio = 1000 * (frames - sum(item[3] for item in blocks)) / sum(item[2] for item in blocks)
+                window = [item for item in history if now - item[0] < 60]
+                drops = sum(item[3] for item in window) if not any(item[4] for item in window) else None
+                best = recent.get(pid)
+                if best is None or frames > best[0]:
+                    recent[pid] = frames, name, ratio, drops
+            if foreground in recent:
+                self.selected_pid = foreground
+            elif self.selected_pid not in recent:
+                self.selected_pid = max(recent, key=lambda pid: recent[pid][0], default=None)
+            choice = recent.get(self.selected_pid)
+            return (choice[1][:90], choice[2], choice[3]) if choice else None
 
 
 class PresentMonFrames:
     def __init__(self, executable):
-        self.data = ForegroundFrames()
+        self.data = PresentationFrames()
         self.process = subprocess.Popen(
             [str(executable), "--output_stdout", "--no_console_stats", "--v1_metrics",
              "--session_name", f"SystemMonitorFrames-{os.getpid()}"],
@@ -622,20 +643,14 @@ class PresentMonFrames:
         self.thread.start()
 
     def collect(self):
-        last_focus = 0
         with self.process.stdout as stream:
             for row in csv.DictReader(stream):
-                now = time.monotonic()
-                if now - last_focus >= 0.2:
-                    self.data.select(foreground_pid())
-                    last_focus = now
                 frame = presentmon_frame(row)
                 if frame is not None:
-                    self.data.capture(frame, now)
+                    self.data.capture(frame, time.monotonic())
 
     def reading(self):
-        self.data.select(foreground_pid())
-        return self.data.reading(time.monotonic()) if self.process.poll() is None else None
+        return self.data.reading(time.monotonic(), foreground_pid()) if self.process.poll() is None else None
 
     def close(self):
         if self.process.poll() is None:
@@ -736,7 +751,11 @@ class LiveFrameSources:
         self.start_game()
 
     def reading(self):
-        return (self.video.reading() if self.video else None) or (self.game.reading() if self.game else None)
+        video = self.video.reading() if self.video else None
+        if video and self.config.get("frame_priority") != "game":
+            return video
+        game = self.game.reading() if self.game else None
+        return game or video
 
     def pair_video(self):
         key = self.config.get("video_key")
@@ -826,9 +845,10 @@ class LiveFPSSetup(QDialog):
             ("Pair it with System Monitor", "Click <b>Copy video pairing code</b> below. Open the "
              "<b>System Monitor Video FPS</b> add-on from the browser's Extensions menu, paste the code, "
              "then click <b>Pair</b>. Reload any Twitch or YouTube tab that was already open."),
-            ("Watch a video", "Play a Twitch stream or YouTube video and keep that browser tab in the foreground. "
-             "The Overview cards appear when readings arrive. Keep the dashboard visible on another display "
-             "if you want to watch the readings without moving focus."),
+            ("Watch a video", "Play a Twitch stream or YouTube video. The Overview cards keep updating "
+             "when you switch windows while the browser continues reporting frames. "
+             "If an older copy of the add-on is loaded, extract the new ZIP into the loaded folder, click "
+             "<b>Reload</b> on its browser extension card, then reload the video tab."),
         ])
         tabs.addTab(video, "Browser video")
         self.zip_path = QLineEdit()
@@ -859,6 +879,16 @@ class LiveFPSSetup(QDialog):
             download.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(game_details["download"])))
             buttons.insert(0, download)
         self.game_status = self.actions(game_layout, buttons)
+        preference = QHBoxLayout()
+        preference.addWidget(label("When both sources are reporting"))
+        priority = QComboBox()
+        priority.addItem("Prefer browser video", "video")
+        priority.addItem("Prefer game", "game")
+        priority.setCurrentIndex(1 if self.sources.config.get("frame_priority") == "game" else 0)
+        priority.currentIndexChanged.connect(lambda: self.set_priority(priority.currentData()))
+        preference.addWidget(priority)
+        preference.addStretch()
+        outer.addLayout(preference)
         close = QPushButton("Done")
         close.clicked.connect(self.accept)
         footer = QHBoxLayout()
@@ -909,6 +939,13 @@ class LiveFPSSetup(QDialog):
                                   ("Pairing enabled. Load the add-on and paste your code."
                                    if sources.config.get("video_key") else "Browser video FPS is disabled."))
         self.game_status.setText(game_message or sources.game_status())
+
+    def set_priority(self, value):
+        self.sources.config["frame_priority"] = value
+        try:
+            self.sources.save()
+        except OSError as error:
+            self.refresh_status(video_message=str(error), game_message=str(error))
 
     def open_addon(self):
         try:
@@ -1170,8 +1207,8 @@ class Window(QMainWindow):
                 ("Select that EXE in System Monitor", "Click <b>Select PresentMon console EXE</b> below, "
                  "browse to the file you downloaded, and select it. System Monitor starts the console capture "
                  "and remembers its location. If you move it, select it again here."),
-                ("Launch or switch to the game", "Keep the game window in the foreground. Overview displays "
-                 "live FPS and dropped frames when the game provides compatible presentation data. "
+                ("Launch or switch to the game", "Overview displays live FPS and dropped frames when "
+                 "the game provides compatible presentation data. You can switch windows while it continues rendering. "
                  "If the setup shows that capture stopped, verify the console EXE and its capture permissions."),
             ],
         }

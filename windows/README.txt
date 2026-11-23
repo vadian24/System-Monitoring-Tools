@@ -71,12 +71,12 @@ Linux pressure and TRIM counts are unavailable from these Windows counters.
 
 Live FPS and dropped frames
 ---------------------------
-The two Overview cards follow a supported source in the foreground and
-hide when no source is reporting. Drops cover the last 60 seconds.
+The two Overview cards follow a supported source that is reporting
+frames, including after you switch windows. Drops cover the last 60 seconds.
 Install the Intel PresentMon console app separately, then choose
 Live FPS setup > Select PresentMon console EXE and point to that console
 executable. A game that emits supported presentation events will begin
-reporting when its window has focus.
+reporting once it is presenting frames.
 
 For Twitch and YouTube, use the Browser video tab in Live FPS setup.
 It opens the folder containing the bundled add-on ZIP and walks through

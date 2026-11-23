@@ -543,15 +543,6 @@ def clock(value):
     return number(value / 1000 if value is not None else None, " GHz", 2)
 
 
-KWIN_SCRIPT = """
-function report(window) {
-    callDBus(SERVICE, "/Focus", "org.systemmonitor.Focus", "updatePid",
-             String(window && window.pid ? window.pid : 0));
-}
-workspace.windowActivated.connect(report);
-report(workspace.activeWindow);
-"""
-
 MANGOHUD_LAUNCHER = """#!/bin/sh
 set -eu
 umask 077
@@ -561,7 +552,6 @@ session=$(mktemp -d "$root/game-XXXXXXXX")
 trap 'rm -rf -- "$session"' EXIT
 trap 'if [ "${pid:-}" ]; then kill -TERM "$pid" 2>/dev/null || :; fi; exit 143' TERM HUP
 trap 'if [ "${pid:-}" ]; then kill -INT "$pid" 2>/dev/null || :; fi; exit 130' INT
-export SYSTEM_MONITOR_FPS_LOG="$session"
 export MANGOHUD_CONFIG="${MANGOHUD_CONFIG:+$MANGOHUD_CONFIG,}autostart_log=1,log_interval=500,log_duration=0,output_folder=$session"
 mangohud "$@" &
 pid=$!
@@ -593,95 +583,37 @@ def mango_fps(path):
 
 class MangoHudFrames:
     def __init__(self, state):
-        from PySide6.QtCore import ClassInfo, QObject
-        from PySide6.QtDBus import QDBusConnection, QDBusMessage
-
-        @ClassInfo(**{"D-Bus Interface": "org.systemmonitor.Focus"})
-        class Focus(QObject):
-            pid = 0
-
-            @Slot(str)
-            def updatePid(self, value):
-                self.pid = int(value) if re.fullmatch(r"[0-9]{1,10}", value) else 0
-
-        if not hasattr(os, "getuid") or "KDE" not in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
-            raise OSError("MangoHud foreground tracking requires KDE Plasma.")
-        self.bus = QDBusConnection.sessionBus()
-        self.service = f"org.systemmonitor.Frames.p{os.getpid()}"
-        self.script_name = f"system-monitor-frames-{os.getpid()}"
-        self.focus = Focus()
         self.root = (state / "frame-games").resolve()
-        self.bus_message = QDBusMessage
-        if not self.bus.registerService(self.service):
-            raise OSError("Could not register with the KDE session.")
-        try:
-            if not self.bus.registerObject("/Focus", self.focus, QDBusConnection.RegisterOption.ExportAllSlots):
-                raise OSError("Could not register the KDE foreground tracker.")
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".js", encoding="utf-8") as script:
-                script.write(KWIN_SCRIPT.replace("SERVICE", json.dumps(self.service)))
-                script.flush()
-                reply = self.kwin("/Scripting", "org.kde.kwin.Scripting", "loadScript", script.name, self.script_name)
-                if reply.type() == QDBusMessage.MessageType.ErrorMessage or not reply.arguments() or reply.arguments()[0] < 0:
-                    raise OSError("KWin could not load the foreground tracker.")
-                reply = self.kwin(f"/Scripting/Script{reply.arguments()[0]}", "org.kde.kwin.Script", "run")
-                if reply.type() == QDBusMessage.MessageType.ErrorMessage:
-                    raise OSError("KWin could not start the foreground tracker.")
-        except Exception:
-            self.close()
-            raise
-
-    def kwin(self, path, interface, method, *arguments):
-        message = self.bus_message.createMethodCall("org.kde.KWin", path, interface, method)
-        message.setArguments(list(arguments))
-        return self.bus.call(message, timeout=800)
+        self.selected = None
 
     def reading(self):
-        pid = self.focus.pid
-        for _ in range(6):
-            if pid <= 1:
-                break
-            process = Path(f"/proc/{pid}")
+        candidates = []
+        for directory in self.root.glob("game-*"):
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            for path in directory.glob("*.csv"):
+                try:
+                    info = path.lstat()
+                except OSError:
+                    continue
+                if (path.name.endswith("_summary.csv") or not stat.S_ISREG(info.st_mode)
+                        or time.time() - info.st_mtime > 3):
+                    continue
+                candidates.append((path == self.selected, info.st_mtime, path))
+        for _, _, path in sorted(candidates, reverse=True):
             try:
-                with (process / "environ").open("rb") as stream:
-                    variables = stream.read(262144).split(b"\0")
-                prefix = b"SYSTEM_MONITOR_FPS_LOG="
-                found = next((value[len(prefix):] for value in variables if value.startswith(prefix)), None)
-                if found:
-                    directory = Path(os.fsdecode(found))
-                    if directory.parent == self.root and directory.is_dir() and not directory.is_symlink():
-                        return self.game_reading(directory)
-                parent = (process / "stat").read_text().rsplit(")", 1)[1].split()[1]
-                pid = int(parent)
-            except (OSError, ValueError, IndexError):
-                break
-        return None
-
-    def game_reading(self, directory):
-        logs = []
-        for path in directory.glob("*.csv"):
-            try:
-                info = path.lstat()
+                fps = mango_fps(path)
             except OSError:
                 continue
-            if path.name.endswith("_summary.csv") or not stat.S_ISREG(info.st_mode) or time.time() - info.st_mtime > 3:
-                continue
-            logs.append((info.st_mtime, path))
-        if not logs:
-            return None
-        path = max(logs)[1]
-        try:
-            fps = mango_fps(path)
-        except OSError:
-            return None
-        if fps is None:
-            return None
-        name = re.sub(r"_\d{4}-\d{2}-\d{2}.*$", "", path.stem)
-        return name[:90], fps, None
+            if fps is not None:
+                self.selected = path
+                name = re.sub(r"_\d{4}-\d{2}-\d{2}.*$", "", path.stem)
+                return name[:90], fps, None
+        self.selected = None
+        return None
 
     def close(self):
-        self.kwin("/Scripting", "org.kde.kwin.Scripting", "unloadScript", self.script_name)
-        self.bus.unregisterObject("/Focus")
-        self.bus.unregisterService(self.service)
+        self.selected = None
 
 
 def configure_mango(state):
@@ -791,7 +723,11 @@ class LiveFrameSources:
         self.start_game()
 
     def reading(self):
-        return (self.video.reading() if self.video else None) or (self.game.reading() if self.game else None)
+        video = self.video.reading() if self.video else None
+        if video and self.config.get("frame_priority") != "game":
+            return video
+        game = self.game.reading() if self.game else None
+        return game or video
 
     def pair_video(self):
         key = self.config.get("video_key")
@@ -875,9 +811,10 @@ class LiveFPSSetup(QDialog):
             ("Pair it with System Monitor", "Click <b>Copy video pairing code</b> below. Open the "
              "<b>System Monitor Video FPS</b> add-on from the browser's Extensions menu, paste the code, "
              "then click <b>Pair</b>. Reload any Twitch or YouTube tab that was already open."),
-            ("Watch a video", "Play a Twitch stream or YouTube video and keep that browser tab in the foreground. "
-             "The Overview cards appear when readings arrive. Keep the dashboard visible on another display "
-             "if you want to watch the readings without moving focus."),
+            ("Watch a video", "Play a Twitch stream or YouTube video. The Overview cards keep updating "
+             "when you switch windows while the browser continues reporting frames. "
+             "If an older copy of the add-on is loaded, extract the new ZIP into the loaded folder, click "
+             "<b>Reload</b> on its browser extension card, then reload the video tab."),
         ])
         tabs.addTab(video, "Browser video")
         self.zip_path = QLineEdit()
@@ -908,6 +845,16 @@ class LiveFPSSetup(QDialog):
             download.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(game_details["download"])))
             buttons.insert(0, download)
         self.game_status = self.actions(game_layout, buttons)
+        preference = QHBoxLayout()
+        preference.addWidget(label("When both sources are reporting"))
+        priority = QComboBox()
+        priority.addItem("Prefer browser video", "video")
+        priority.addItem("Prefer game", "game")
+        priority.setCurrentIndex(1 if self.sources.config.get("frame_priority") == "game" else 0)
+        priority.currentIndexChanged.connect(lambda: self.set_priority(priority.currentData()))
+        preference.addWidget(priority)
+        preference.addStretch()
+        outer.addLayout(preference)
         close = QPushButton("Done")
         close.clicked.connect(self.accept)
         footer = QHBoxLayout()
@@ -958,6 +905,13 @@ class LiveFPSSetup(QDialog):
                                   ("Pairing enabled. Load the add-on and paste your code."
                                    if sources.config.get("video_key") else "Browser video FPS is disabled."))
         self.game_status.setText(game_message or sources.game_status())
+
+    def set_priority(self, value):
+        self.sources.config["frame_priority"] = value
+        try:
+            self.sources.save()
+        except OSError as error:
+            self.refresh_status(video_message=str(error), game_message=str(error))
 
     def open_addon(self):
         try:
@@ -1206,16 +1160,15 @@ class Window(QMainWindow):
             "button": "Copy MangoHud launch option",
             "tooltip": "Copy the launch option to paste into the game's Steam properties.",
             "steps": [
-                ("Check MangoHud on KDE Plasma", "Open Konsole and run <b>mangohud --version</b>. "
-                 "If it is missing on Nobara or Fedora, run <b>sudo dnf install mangohud</b>. "
-                 "Automatic game tracking requires a KDE Plasma session."),
+                ("Check MangoHud", "Open Konsole and run <b>mangohud --version</b>. "
+                 "If it is missing on Nobara or Fedora, run <b>sudo dnf install mangohud</b>."),
                 ("Set the game's launch option", "Click <b>Copy MangoHud launch option</b> below. "
                  "In Steam, right-click the game in <b>Library</b>, choose <b>Properties → General</b>, "
                  "and paste the copied text into <b>Launch Options</b>. For a non-Steam game, use the "
                  "copied launcher path followed by the game command in place of <b>%command%</b>."),
-                ("Restart the game and switch to it", "Launch the game after saving the option and keep "
-                 "its window in the foreground. Overview displays its live FPS. MangoHud supplies FPS "
-                 "for this integration, so the dropped-frames value is marked <b>Unavailable</b>."),
+                ("Restart the game", "Launch the game after saving the option. Overview displays "
+                 "live FPS while the game produces readings, including after you switch windows. "
+                 "MangoHud supplies FPS for this integration. Dropped frames are marked <b>Unavailable</b>."),
             ],
         }
         LiveFPSSetup(self, self.live_frames, guide, self.configure_game_frames).exec()
