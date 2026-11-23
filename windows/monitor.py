@@ -638,10 +638,11 @@ def store_peers(db, now, rows):
 
 
 def drive_result(drive, readings=(), issues=(), *, status="Unavailable", checked=None, note=""):
+    health_check = status
     if issues:
         status = "Critical" if any(issue[0] == "Critical" for issue in issues) else "Warning"
     return {**drive, "readings": list(readings), "issues": list(issues),
-            "status": status,
+            "status": status, "health_check": health_check,
             "checked": time.time() if checked is None else checked, "note": note}
 
 
@@ -746,7 +747,8 @@ def read_drive_health(drive, previous):
         issues.append(("Warning", f"Uncorrected errors: {read_errors or 0} read, {write_errors or 0} write", BACK_UP))
     if wear is not None and wear >= 100:
         issues.append(("Warning", f"Rated endurance used: {wear}%", WEAR_DRIVE))
-    status = "Healthy" if health == 0 and readings else "Unavailable"
+    status = {1: "Drive warning", 2: "Drive unhealthy"}.get(
+        health, "Healthy" if health == 0 and readings else "Unavailable")
     note = ("Source: Windows storage reliability counters." if readings else
             "Windows did not expose reliability counters for this drive. USB bridges, device drivers, and access permissions can limit what is available.")
     return drive_result(drive, readings, issues, status=status, note=note)

@@ -655,10 +655,11 @@ def store_peers(db, now, rows):
 
 
 def drive_result(drive, readings=(), issues=(), *, status="Unavailable", checked=None, note=""):
+    health_check = status
     if issues:
         status = "Critical" if any(issue[0] == "Critical" for issue in issues) else "Warning"
     return {**drive, "readings": list(readings), "issues": list(issues),
-            "status": status,
+            "status": status, "health_check": health_check,
             "checked": time.time() if checked is None else checked, "note": note}
 
 
@@ -787,7 +788,9 @@ def udisks_read_health(drive, previous):
     if is_ata:
         bad = max(0, values.get("SmartNumBadSectors", 0))
         issues = []
-        if values.get("SmartFailing"):
+        failing = values.get("SmartFailing")
+        health_check = "SMART failed" if failing else "SMART passed" if failing is False else "Unavailable"
+        if failing:
             issues.append(("Critical", "SMART health check failed", REPLACE_DRIVE))
         if bad:
             issues.append(("Warning", f"{bad} bad sectors reported", BACK_UP))
@@ -800,7 +803,8 @@ def udisks_read_health(drive, previous):
                             ("reallocated-sector-count", "Reallocated sectors"),
                             ("offline-uncorrectable", "Uncorrectable sectors")):
             if attributes.get(attr):
-                issues.append(("Warning", f"{label}: {attributes[attr]}", BACK_UP))
+                level = "Critical" if label == "Uncorrectable sectors" else "Warning"
+                issues.append((level, f"{label}: {attributes[attr]}", BACK_UP))
         readings = drive_readings([("Temperature", f"{temp} °C" if temp is not None else None),
                                    ("Bad sectors", bad), ("Pending sectors", attributes.get("current-pending-sector")),
                                    ("Reallocated sectors", attributes.get("reallocated-sector-count")),
@@ -811,7 +815,9 @@ def udisks_read_health(drive, previous):
         if not code:
             report, = json.loads(raw)["data"]
             health = {key: item["data"] for key, item in report.items()}
-        warnings = values.get("SmartCriticalWarning", [])
+        warnings = values.get("SmartCriticalWarning")
+        health_check = "SMART warning" if warnings == ["temperature"] else (
+            "SMART failed" if warnings else "SMART passed" if warnings == [] else "Unavailable")
         issues = nvme_issues(warnings, health.get("media_errors"), health.get("percent_used"))
         wear = health.get("percent_used")
         threshold = health.get("wctemp")
@@ -820,7 +826,7 @@ def udisks_read_health(drive, previous):
         readings = drive_readings([("Temperature", f"{temp} °C" if temp is not None else None),
                                    ("Endurance used", f"{wear}%" if wear is not None else None),
                                    ("Media errors", health.get("media_errors"))])
-    result = drive_result(drive, readings, issues, status="SMART passed", checked=checked, note="Source: UDisks SMART data.")
+    result = drive_result(drive, readings, issues, status=health_check, checked=checked, note="Source: UDisks SMART data.")
     return sleeping_drive(drive, result) if sleeping else result
 
 
@@ -885,8 +891,15 @@ def read_drive_health(drive, previous):
         if count is not None:
             readings.append((label, count))
         if count:
-            issues.append(("Warning", f"{label}: {count}", BACK_UP))
-    status = "SMART passed" if smart is True else "Unavailable"
+            level = "Critical" if label == "Uncorrectable sectors" else "Warning"
+            issues.append((level, f"{label}: {count}", BACK_UP))
+    flags = nvme.get("critical_warning")
+    if flags == 2:
+        status = "SMART warning"
+    elif flags or smart is False:
+        status = "SMART failed"
+    else:
+        status = "SMART passed" if smart is True else "Unavailable"
     return drive_result(drive, readings, issues, status=status, note="Source: smartmontools.")
 
 

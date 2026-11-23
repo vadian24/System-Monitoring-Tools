@@ -39,7 +39,7 @@ Open **Linux System Monitor** from your application launcher. The installer uses
 
 ## Drive health
 
-Overview detects connected drives and lists one card per drive. Select a card to see the last check, readings, and suggested steps for any warning. Cards turn yellow or red for warnings or critical conditions. **Check now** requests a background refresh. New health warnings are recorded in Events under Storage.
+Overview detects connected drives and lists one card per drive with its name, type, health check, temperature, and sector or media status. Select a card to see the last check, readings, and suggested steps for any warning. Cards turn yellow or red for warnings or critical conditions. **Check now** requests a background refresh. New health warnings are recorded in Events under Storage.
 
 Linux reads SMART through UDisks when available and can fall back to smartmontools for directly accessible drives. Supported sleeping HDDs are left asleep. USB flash drives and some enclosures may expose no SMART data. Permissions and controller support affect available readings.
 

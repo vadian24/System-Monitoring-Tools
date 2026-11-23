@@ -36,8 +36,9 @@ and remove Windows System Monitor Collector.
 
 Drive health
 ------------
-Overview detects connected drives and lists one card per drive. Select a
-card for its last check, readings, and suggested steps for any warning.
+Overview shows each connected drive with its name, type, health check,
+temperature, and sector or media status. Select a card for its last check,
+readings, and suggested steps for any warning.
 Warning and critical cards turn yellow and red. Check now requests a
 background refresh. Drive health warnings appear under Storage in Events.
 Windows storage drivers, USB bridges and permissions determine which health

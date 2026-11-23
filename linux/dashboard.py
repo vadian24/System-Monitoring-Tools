@@ -373,6 +373,53 @@ class UpdateBanner(QWidget):
         self.show_result("Update failed", str(result))
 
 
+DRIVE_COLORS = {
+    "healthy": ("#1c392f", "#a9edbc"),
+    "warning": ("#ffd45b", "#191300"),
+    "critical": ("#be273d", "#ffffff"),
+    "unavailable": ("#262d39", "#d1d6df"),
+}
+
+
+def drive_sector_summary(readings):
+    fields = ("Bad sectors", "Pending sectors", "Reallocated sectors", "Uncorrectable sectors")
+    sectors = [readings[name] for name in fields if name in readings]
+    if readings.get("Uncorrectable sectors", 0) > 0:
+        return "Sector status", "Uncorrectable sectors", "critical"
+    if sectors:
+        return ("Sector status", "Sectors flagged", "warning") if any(sectors) else (
+            "Sector status", "No errors reported", "healthy")
+    media = [readings[name] for name in ("Media errors", "Uncorrected read errors", "Uncorrected write errors")
+             if name in readings]
+    if media:
+        return ("Media status", "Errors reported", "warning") if any(media) else (
+            "Media status", "No errors reported", "healthy")
+    return "Sector status", "Unavailable", "unavailable"
+
+
+class DriveCard(QPushButton):
+    def sizeHint(self):
+        return self.layout().sizeHint() if self.layout() else super().sizeHint()
+
+    def minimumSizeHint(self):
+        return self.layout().minimumSize() if self.layout() else super().minimumSizeHint()
+
+
+def drive_metric(title, text, state=None):
+    column = QVBoxLayout()
+    column.setSpacing(4)
+    column.addWidget(label(title, "metricTitle"))
+    value = label(text)
+    value.setWordWrap(True)
+    if state:
+        background, foreground = DRIVE_COLORS[state]
+        value.setStyleSheet(f"background:{background}; color:{foreground}; border-radius:5px; padding:4px; font-weight:600;")
+    else:
+        value.setStyleSheet("font-size:17px; font-weight:700;")
+    column.addWidget(value)
+    return column
+
+
 class Window(QMainWindow):
     def __init__(self, state, autostart, launcher):
         super().__init__()
@@ -952,28 +999,58 @@ class Window(QMainWindow):
                                    "No drives detected." if rows == [] else "Waiting for drive health readings…")
         for index, drive in enumerate(rows or []):
             status = drive["status"]
-            reason = next((reason for level, reason, _ in drive["issues"] if level == status), drive["device"])
-            card = QPushButton(f'{drive["name"][:45]}\n{status} · {reason[:66]}')
-            card.setMinimumHeight(64)
-            card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-            card.setToolTip(f'{drive["name"]} — {status} · {reason}')
-            card.setAccessibleName(f'{drive["name"]}. {status}. {reason}.')
-            background, foreground = {
-                "Critical": ("#be273d", "#ffffff"),
-                "Warning": ("#ffd45b", "#191300"),
-                "SMART passed": ("#1b2b27", "#a9edbc"),
-                "Healthy": ("#1b2b27", "#a9edbc"),
-            }.get(status, ("#262d39", "#d1d6df"))
-            card.setStyleSheet(f"QPushButton {{background:{background}; color:{foreground}; text-align:left;"
-                               " padding:8px 12px; border:2px solid transparent; border-radius:8px;}"
-                               f" QPushButton:hover, QPushButton:focus {{border-color:{foreground};}}")
+            check = drive.get("health_check", status)
+            readings = dict(drive["readings"])
+            temperature = readings.get("Temperature", "Unavailable")
+            sector_title, sector, sector_state = drive_sector_summary(readings)
+            reason = next((reason for level, reason, _ in drive["issues"] if level == status), "")
+            card = DriveCard()
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            card.setToolTip(f'{drive["name"]} · {reason or "Open drive details"}')
+            card.setAccessibleName(f'{drive["name"]}, {drive["kind"]}. {check}. Temperature: {temperature}. {sector_title}: {sector}. {reason}')
+            background, border = {"Warning": ("#3b311c", "#ffd45b"),
+                                  "Critical": ("#451e2a", "#ff7888")}.get(status, ("#191f2b", "#2c3546"))
+            card.setStyleSheet(
+                f"QPushButton {{background:{background}; border:1px solid {border}; border-radius:12px; padding:0;}}"
+                "QPushButton:hover, QPushButton:focus {border-color:#76ccff;}")
+            contents = QVBoxLayout(card)
+            contents.setContentsMargins(13, 10, 13, 9)
+            identity = label(drive["name"], "metricTitle")
+            identity.setTextFormat(Qt.TextFormat.PlainText)
+            identity.setWordWrap(True)
+            contents.addWidget(identity)
+            kind = label(f'{drive["kind"]} · {drive["device"]}', "muted")
+            kind.setTextFormat(Qt.TextFormat.PlainText)
+            contents.addWidget(kind)
+            if reason:
+                alert = label(reason)
+                alert.setTextFormat(Qt.TextFormat.PlainText)
+                alert.setWordWrap(True)
+                alert.setStyleSheet("color:#ffe4a0;" if status == "Warning" else "color:#ffabb4;")
+                contents.addWidget(alert)
+            metrics = QHBoxLayout()
+            check_state = {
+                "SMART passed": "healthy", "Healthy": "healthy",
+                "SMART warning": "warning", "Drive warning": "warning",
+                "SMART failed": "critical", "Drive unhealthy": "critical",
+                "Critical": "critical", "Warning": "warning",
+            }.get(check, "unavailable")
+            metrics.addLayout(drive_metric("Health check", check, check_state), 1)
+            metrics.addLayout(drive_metric("Temp", temperature), 1)
+            metrics.addLayout(drive_metric(sector_title, sector, sector_state), 1)
+            contents.addLayout(metrics)
+            card.setMinimumHeight(contents.minimumSize().height())
+            for child in card.findChildren(QLabel):
+                child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             card.clicked.connect(lambda checked=False, selected=drive: self.show_drive_details(selected))
             self.drive_cards.addWidget(card, index // 2, index % 2)
 
     def show_drive_details(self, drive):
         checked = local_time(drive["checked"]) if drive["checked"] else "No successful check"
         lines = [f'{drive["name"]} · {drive["kind"]} · {drive["device"]}',
-                 f'Status: {drive["status"]}', f"Last check: {checked}"]
+                 f'Status: {drive["status"]}', f'Health check: {drive.get("health_check", drive["status"])}',
+                 f"Last check: {checked}"]
         if drive["note"]:
             lines += ["", drive["note"]]
         if drive["readings"]:
