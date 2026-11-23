@@ -45,7 +45,13 @@ Overview adds clock speeds, CPU package power, Vcore, load averages, runnable ta
 
 I/O pressure charts show Full (solid) and Some (dashed). Hardware shows per-drive read and write throughput, completed operations per second, average latency, busy time, average outstanding I/O, and completed TRIM discard requests per second.
 
-In **Frame performance**, select **Open frame capture** and choose a MangoHud or PresentMon CSV. The dashboard reads recent rows as the file is updated. Use a capture targeted to one game. MangoHud typically supplies frame time and GPU load. CPU time per frame is shown when the capture contains that reading. Where the capture lacks GPU utilization, the card shows the current adapter reading explicitly labeled Live.
+### Live FPS and dropped frames
+
+Overview shows two compact cards when a supported foreground source is reporting: **Live FPS** and **Dropped frames** over the last 60 seconds. The cards hide when the source is no longer active. MangoHud supplies FPS and does not report dropped frames to the monitor.
+
+- **Games on KDE Plasma:** Install MangoHud if needed. Choose **Live FPS setup → Copy MangoHud launch option**, paste it into that game's Steam Launch Options, then restart the game. Outside Steam, use the same launcher path followed by the game command in place of `%command%`. The monitor uses a temporary KWin script to identify the active window and reads the MangoHud log from that game session.
+- **Twitch and YouTube:** Install and pair the [System Monitor Video FPS add-on](../browser-extension/README.md) for a Chromium browser. Focus the playing video tab. The pairing code works across app restarts until you select **Disable video FPS**.
+
 
 ## Drive health
 

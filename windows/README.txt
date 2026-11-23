@@ -69,11 +69,20 @@ Hardware lists throughput, operations per second, average read and write
 latency, busy time and average queue depth per drive where available.
 Linux pressure and TRIM counts are unavailable from these Windows counters.
 
-Select Open frame capture in Overview or Hardware to read a PresentMon
-or MangoHud CSV, including new complete samples as they are written. Use a
-capture targeted to one game. CPU time per frame requires a CSV recording
-that includes that field. GPU utilization displays the current adapter
-reading labeled Live when there is no GPU utilization column in the file.
+Live FPS and dropped frames
+---------------------------
+The two Overview cards follow a supported source in the foreground and
+hide when no source is reporting. Drops cover the last 60 seconds.
+Install the Intel PresentMon console app separately, then choose
+Live FPS setup > Select PresentMon console EXE and point to that console
+executable. A game that emits supported presentation events will begin
+reporting when its window has focus.
+
+For Twitch and YouTube, install the System Monitor Video FPS add-on in
+a Chromium browser. See browser-extension/README.md in the GitHub
+repository for installation and pairing. Only the local monitor receives
+the site label and frame counters.
+
 
 Dashboard updates
 -----------------

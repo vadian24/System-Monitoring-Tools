@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>System Monitor Video FPS</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; width: 260px; margin: 16px; color-scheme: light dark; }
+    h1 { font-size: 17px; }
+    input { box-sizing: border-box; width: 100%; margin: 6px 0 12px; padding: 6px; }
+    button { margin-right: 8px; }
+    #status { min-height: 1.1em; }
+  </style>
+</head>
+<body>
+  <h1>System Monitor Video FPS</h1>
+  <p>Copy the pairing code from <strong>Live FPS setup</strong> in System Monitor.</p>
+  <form>
+    <label for="key">Pairing code</label>
+    <input id="key" type="password" autocomplete="off" required>
+    <button type="submit">Pair</button><button type="button" id="unpair">Unpair</button>
+  </form>
+  <p id="status" role="status"></p>
+  <script src="pair.js"></script>
+</body>
+</html>

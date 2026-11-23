@@ -1,15 +1,18 @@
 """Qt dashboard for the local system monitor."""
 import csv
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from functools import lru_cache
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
-import math
+import os
+import re
+import secrets
 from pathlib import Path
 import sqlite3
-import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -538,54 +541,265 @@ def clock(value):
     return number(value / 1000 if value is not None else None, " GHz", 2)
 
 
-def frame_rows(path):
-    # Read the header and a bounded tail so a growing per-frame log stays cheap.
-    with path.open("rb") as stream:
-        start = stream.read(16384)
-        size = stream.seek(0, 2)
-        offset = max(0, size - 2 * 1024 * 1024)
-        stream.seek(offset)
-        tail = stream.read(2 * 1024 * 1024)
-    def fields(lines):
-        return csv.reader(lines.decode("utf-8-sig", "replace").splitlines())
-    aliases = ("frametime", "msbetweenpresents", "cpuframetime")
-    def normalize(text):
-        return "".join(c for c in text.lower() if c.isalnum())
-    headers = next(([normalize(cell) for cell in row] for row in fields(start)
-                    if any(normalize(cell) in aliases for cell in row)), None)
-    if headers is None:
-        return []
-    def numeric(row, keys):
-        for key in keys:
-            try:
-                value = float(row.get(key, ""))
-                if math.isfinite(value) and value >= 0:
-                    return value
-            except ValueError:
-                pass
+def foreground_pid():
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    window = user32.GetForegroundWindow()
+    pid = wintypes.DWORD()
+    if window:
+        user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
+    return pid.value if pid.value != os.getpid() else 0
+
+
+def presentmon_frame(row):
+    try:
+        pid = int(row["ProcessID"])
+        chain = row["SwapChainAddress"]
+        name = row["Application"]
+        frame_time = float(row["MsBetweenPresents"])
+        if not (chain and name and 0 < frame_time <= 10000):
+            return None
+        dropped = row.get("Dropped", "").strip().lower()
+        return pid, chain, name, frame_time, (dropped in ("1", "true") if dropped in
+                                              ("0", "1", "true", "false") else None)
+    except (KeyError, TypeError, ValueError):
         return None
-    if offset:
-        tail = tail.partition(b"\n")[2]
-    rows = []
-    for cells in fields(tail):
-        if len(cells) != len(headers):
-            continue
-        row = dict(zip(headers, cells))
-        frame = numeric(row, aliases)
-        if not frame or frame > 10000:
-            continue
-        cpu = numeric(row, ("mscpubusy", "cpubusy", "cpuframetime"))
-        gpu = numeric(row, ("gpuload", "gpuutilization", "gpuutil"))
-        identity = tuple(row.get(field, "") for field in ("application", "processid", "swapchainaddress"))
-        timestamp = numeric(row, ("timeinseconds", "cpustarttime"))
-        rows.append((identity, timestamp, frame, cpu, gpu if gpu is None or gpu <= 100 else None))
-    if not rows:
-        return []
-    identity = rows[-1][0]
-    rows = [row for row in rows if row[0] == identity]
-    if rows[-1][1] is not None and rows[0][1] is not None and 0 < rows[-1][1] - rows[0][1]:
-        rows = [row for row in rows if row[1] is not None and 0 <= rows[-1][1] - row[1] <= 60]
-    return rows[-300:]
+
+
+class ForegroundFrames:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.pid = 0
+        self.chains = {}
+
+    def select(self, pid):
+        with self.lock:
+            if pid != self.pid:
+                self.pid = pid
+                self.chains.clear()
+
+    def capture(self, frame, now):
+        pid, identity, name, frame_time, dropped = frame
+        with self.lock:
+            if not pid or pid != self.pid:
+                return
+            if identity not in self.chains and len(self.chains) >= 16:
+                del self.chains[min(self.chains, key=lambda key: self.chains[key][1][-1][0])]
+            _, records = self.chains.setdefault(identity, (name, deque(maxlen=66000)))
+            records.append((now, frame_time, dropped))
+            while records[0][0] <= now - 60:
+                records.popleft()
+
+    def reading(self, now):
+        with self.lock:
+            options = [(name, records, sum(1 for timestamp, _, _ in records if timestamp > now - 1))
+                       for name, records in self.chains.values() if now - records[-1][0] <= 1.5]
+            if not options:
+                return None
+            name, records, _ = max(options, key=lambda row: (row[2], len(row[1])))
+            recent = [(elapsed, dropped) for timestamp, elapsed, dropped in records if timestamp > now - 1.5]
+            if len(recent) < 2:
+                return None
+            fps = 1000 * sum(dropped is not True for _, dropped in recent) / sum(elapsed for elapsed, _ in recent)
+            drops = (sum(dropped is True for timestamp, _, dropped in records if timestamp > now - 60)
+                     if all(dropped is not None for _, dropped in recent) else None)
+            return name[:90], fps, drops
+
+
+class PresentMonFrames:
+    def __init__(self, executable):
+        self.data = ForegroundFrames()
+        self.process = subprocess.Popen(
+            [str(executable), "--output_stdout", "--no_console_stats", "--v1_metrics",
+             "--session_name", f"SystemMonitorFrames-{os.getpid()}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8-sig", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
+        self.thread = threading.Thread(target=self.collect, daemon=True)
+        self.thread.start()
+
+    def collect(self):
+        last_focus = 0
+        with self.process.stdout as stream:
+            for row in csv.DictReader(stream):
+                now = time.monotonic()
+                if now - last_focus >= 0.2:
+                    self.data.select(foreground_pid())
+                    last_focus = now
+                frame = presentmon_frame(row)
+                if frame is not None:
+                    self.data.capture(frame, now)
+
+    def reading(self):
+        self.data.select(foreground_pid())
+        return self.data.reading(time.monotonic()) if self.process.poll() is None else None
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.terminate()
+
+
+VIDEO_PORT = 43178
+VIDEO_SOURCES = {"Twitch", "YouTube"}
+
+
+def video_sample(payload):
+    source, fps, drops = payload.get("source"), payload.get("fps"), payload.get("drops")
+    if (not isinstance(source, str) or source not in VIDEO_SOURCES or type(fps) not in (int, float)
+            or not 0 <= fps <= 1000 or type(drops) is not int or not 0 <= drops <= 60000):
+        return None
+    return source, fps, drops
+
+
+class VideoReceiver:
+    def __init__(self, key):
+        self.latest = None
+
+        class Handler(BaseHTTPRequestHandler):
+            def setup(self):
+                self.request.settimeout(2)
+                super().setup()
+
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                authorization = self.headers.get("Authorization", "").encode("utf-8")
+                if (self.path != "/video" or self.headers.get("Host") != f"127.0.0.1:{VIDEO_PORT}"
+                        or not secrets.compare_digest(authorization, f"Bearer {key}".encode("ascii"))):
+                    self.send_error(403)
+                    return
+                try:
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 1 <= size <= 512 or self.headers.get_content_type() != "application/json":
+                        raise ValueError("Invalid sample")
+                    payload = json.loads(self.rfile.read(size))
+                    sample = video_sample(payload) if isinstance(payload, dict) else None
+                except (ValueError, OSError):
+                    sample = None
+                if sample is None:
+                    self.send_error(400)
+                    return
+                receiver.latest = (time.monotonic(), sample)
+                self.send_response(204)
+                self.end_headers()
+
+        receiver = self
+        self.server = HTTPServer(("127.0.0.1", VIDEO_PORT), Handler)
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
+
+    def reading(self):
+        sample = self.latest
+        return sample[1] if sample and time.monotonic() - sample[0] <= 2.75 else None
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class LiveFrameSources:
+    def __init__(self, state):
+        self.state = state
+        config = updater.read_json(state / "live-frames.json")
+        self.config = config if isinstance(config, dict) else {}
+        self.video = None
+        self.game = None
+        self.video_error = ""
+        self.game_error = ""
+
+    def save(self):
+        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.state, delete=False) as stream:
+            pending = Path(stream.name)
+            try:
+                json.dump(self.config, stream)
+            except (OSError, ValueError, TypeError):
+                stream.close()
+                pending.unlink(missing_ok=True)
+                raise
+        try:
+            pending.replace(self.state / "live-frames.json")
+        finally:
+            pending.unlink(missing_ok=True)
+
+    def start(self):
+        key = self.config.get("video_key")
+        if isinstance(key, str) and re.fullmatch(r"[a-f0-9]{32}", key) and self.video is None:
+            try:
+                self.video = VideoReceiver(key)
+                self.video_error = ""
+            except OSError as error:
+                self.video_error = f"Video receiver unavailable: {error}"
+        self.start_game()
+
+    def reading(self):
+        return (self.video.reading() if self.video else None) or (self.game.reading() if self.game else None)
+
+    def pair_video(self):
+        key = self.config.get("video_key")
+        if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):
+            self.config["video_key"] = secrets.token_hex(16)
+            self.save()
+        self.start()
+        if self.video is None:
+            raise OSError(self.video_error)
+        return self.config["video_key"]
+
+    def stop_video(self):
+        self.config.pop("video_key", None)
+        self.save()
+        if self.video:
+            self.video.close()
+            self.video = None
+        self.video_error = ""
+
+    game_button = "Select PresentMon console EXE"
+
+    def help_text(self):
+        if self.game is not None and self.game.process.poll() is not None:
+            self.game_error = "PresentMon stopped. Check the console version and capture permissions."
+        return ("Browser video requires the System Monitor Video FPS extension for Chromium browsers. "
+                "For games, select an installed PresentMon console executable. "
+                + self.video_error + " " + self.game_error)
+
+    def start_game(self):
+        executable = self.config.get("game")
+        if executable and self.game is None and sys.platform == "win32":
+            try:
+                path = Path(executable)
+                if not path.is_absolute() or path.suffix.lower() != ".exe" or not path.is_file():
+                    raise OSError("PresentMon executable is unavailable.")
+                self.game = PresentMonFrames(path)
+                self.game_error = ""
+            except OSError as error:
+                self.game_error = str(error)
+
+    def enable_game(self, filename):
+        self.stop_game()
+        self.config["game"] = filename
+        self.save()
+        self.start_game()
+        if self.game is None:
+            raise OSError(self.game_error or "PresentMon is only available on Windows.")
+
+    def stop_game(self):
+        self.config.pop("game", None)
+        self.save()
+        if self.game:
+            self.game.close()
+            self.game = None
+        self.game_error = ""
+
+
+    def close(self):
+        if self.video:
+            self.video.close()
+        if self.game:
+            self.game.close()
+
 
 
 class Window(QMainWindow):
@@ -594,9 +808,7 @@ class Window(QMainWindow):
         self.state = state
         self.launcher = launcher
         self.snapshot = {}
-        self.frame_capture = None
-        self.frame_signature = None
-        self.frame_samples = []
+        self.live_frames = LiveFrameSources(state)
         self.graph_streaks = {}
         self.drive_activity_cards = {}
         self.settings = {}
@@ -664,6 +876,10 @@ class Window(QMainWindow):
         self.timer = QTimer(self, interval=2000)
         self.timer.timeout.connect(self.refresh)
         self.timer.start()
+        self.fps_timer = QTimer(self, interval=750)
+        self.fps_timer.timeout.connect(self.show_live_frames)
+        self.fps_timer.start()
+        QTimer.singleShot(0, self.live_frames.start)
         self.refresh()
 
     def add_page(self, name, scrollable=False):
@@ -692,6 +908,9 @@ class Window(QMainWindow):
             self.range.addItem(name, seconds)
         self.range.currentIndexChanged.connect(self.refresh_history)
         toolbar.addWidget(self.range)
+        frames_setup = QPushButton("Live FPS setup")
+        frames_setup.clicked.connect(self.configure_live_frames)
+        toolbar.addWidget(frames_setup)
         layout.addLayout(toolbar)
         system_metrics = (
             ("CPU utilization", COLORS[0], 100),
@@ -706,6 +925,9 @@ class Window(QMainWindow):
         if WINDOWS:
             disk[1].hide()
             self.disk_overview = disk[0], add_card_context(disk)
+            for column in range(cards.columnCount()):
+                cards.setColumnStretch(column, 1)
+                cards.itemAtPosition(0, column).widget().layout().addStretch()
         self.add_drive_health(layout)
         gpu_header = QHBoxLayout()
         gpu_header.addWidget(label("GPU activity", "section"))
@@ -739,7 +961,7 @@ class Window(QMainWindow):
         table, self.recent = make_table(["Last seen", "Severity", "Category", "Occurrences", "Message"],
                                        {0: local_time, 1: LEVELS.get}, descending=True,
                                        widths=[130, 85, 130, 95], severity=1)
-        table.setMinimumHeight(155)
+        table.setMinimumHeight(155 + 10 * table.verticalHeader().defaultSectionSize())
         layout.addWidget(table, 1)
         table.doubleClicked.connect(lambda _: self.tabs.setCurrentIndex(4))
 
@@ -758,67 +980,66 @@ class Window(QMainWindow):
             ("Core clocks", "CPU package power", "Load average & run queue", "CPU time · last 60 s"),
             (COLORS[0], COLORS[3], COLORS[1], COLORS[2])))
         layout.addLayout(cards)
-        self.add_frame_section(layout, hardware=False)
+        self.add_live_frames(layout)
 
-    def add_frame_section(self, layout, *, hardware):
-        bar = QHBoxLayout()
-        bar.addWidget(label("Frame performance", "section"))
-        bar.addStretch()
-        status = label("", "muted")
-        status.setWordWrap(True)
-        bar.addWidget(status)
-        open_csv = QPushButton("Open frame capture")
-        open_csv.clicked.connect(self.select_frame_capture)
-        bar.addWidget(open_csv)
-        layout.addLayout(bar)
-        definitions = (("Frame time", COLORS[0]), ("CPU time per frame", COLORS[1]), ("GPU utilization", COLORS[2]))
-        if hardware:
-            grid, self.frame_charts = metric_cards((title, color, None) for title, color in definitions)
-            self.frame_hardware = [(card[0], add_card_context(card)) for card in self.frame_charts]
-            self.frame_hardware_status = status
-        else:
-            grid, self.frame_overview = compact_cards(definitions)
-            self.frame_overview_status = status
-        layout.addLayout(grid)
+    def add_live_frames(self, layout):
+        self.frames_panel = QWidget()
+        body = QVBoxLayout(self.frames_panel)
+        body.setContentsMargins(0, 0, 0, 0)
+        cards, self.live_frame_cards = compact_cards((("Live FPS", COLORS[0]), ("Dropped frames", COLORS[3])))
+        body.addLayout(cards)
+        self.frames_panel.hide()
+        layout.addWidget(self.frames_panel)
 
-    def select_frame_capture(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "Open frame capture", "", "CSV files (*.csv)")
+    def show_live_frames(self):
+        if self.pause.isChecked():
+            return
+        sample = self.live_frames.reading()
+        self.frames_panel.setVisible(sample is not None)
+        if sample:
+            source, fps, drops = sample
+            apply_fields(self.live_frame_cards, [
+                (number(fps, " FPS", 0), source),
+                ("Unavailable" if drops is None else f"{drops:,}", f"{source} · last 60 s"),
+            ])
+
+    def configure_live_frames(self):
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Live FPS setup")
+        dialog.setText("Connect a source for live FPS and dropped frames.")
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setInformativeText(self.live_frames.help_text())
+        browser = dialog.addButton("Copy video pairing code", QMessageBox.ButtonRole.ActionRole)
+        game = dialog.addButton(self.live_frames.game_button, QMessageBox.ButtonRole.ActionRole)
+        disable_video = None
+        disable_game = None
+        if self.live_frames.config.get("video_key"):
+            disable_video = dialog.addButton("Disable video FPS", QMessageBox.ButtonRole.ActionRole)
+        if self.live_frames.config.get("game"):
+            disable_game = dialog.addButton("Disable game FPS", QMessageBox.ButtonRole.ActionRole)
+        dialog.addButton(QMessageBox.StandardButton.Close)
+        dialog.exec()
+        selected = dialog.clickedButton()
+        try:
+            if selected is browser:
+                QApplication.clipboard().setText(self.live_frames.pair_video())
+                QMessageBox.information(self, "Video pairing code copied",
+                                        "Paste the code in the System Monitor Video FPS browser extension and reload the video tab.")
+            elif selected is game:
+                self.configure_game_frames()
+            elif disable_video is not None and selected is disable_video:
+                self.live_frames.stop_video()
+            elif disable_game is not None and selected is disable_game:
+                self.live_frames.stop_game()
+            self.show_live_frames()
+        except OSError as error:
+            QMessageBox.warning(self, "Live FPS setup", str(error))
+
+
+    def configure_game_frames(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Select PresentMon console EXE", "", "Executables (*.exe)")
         if filename:
-            self.frame_capture = Path(filename)
-            self.frame_signature = None
-            self.show_frame_capture()
-
-    def show_frame_capture(self):
-        capture, points = self.frame_capture, self.frame_samples
-        if capture is not None:
-            try:
-                state = capture.stat()
-                if not stat.S_ISREG(state.st_mode):
-                    raise OSError("Expected a regular CSV file")
-                signature = (state.st_mtime_ns, state.st_size)
-                if signature != self.frame_signature:
-                    points = self.frame_samples = frame_rows(capture)
-                    self.frame_signature = signature
-            except (OSError, csv.Error):
-                points = []
-                self.frame_signature = None
-        latest = points[-1] if points else ((), None, None, None, None)
-        gpu = self.snapshot.get("gpu", [])
-        current_gpu = next((row for row in gpu if row[0] == getattr(self, "selected_gpu", None)), gpu[0] if gpu else None)
-        gpu_value = latest[4] if latest[4] is not None else current_gpu[2] if current_gpu else None
-        values = [
-            (number(latest[2], " ms"), "From frame capture"),
-            (number(latest[3], " ms"), "CPU timing, when reported by capture"),
-            (percent(gpu_value), "From frame capture" if latest[4] is not None else
-             f"Live · {current_gpu[0]}" if current_gpu else "GPU utilization unavailable"),
-        ]
-        for fields, status in ((self.frame_overview, self.frame_overview_status),
-                               (self.frame_hardware, self.frame_hardware_status)):
-            apply_fields(fields, values)
-            status.setText((latest[0][0] or capture.name) if points else
-                           "No compatible samples" if capture else "MangoHud or PresentMon CSV")
-        for column, (_, chart) in enumerate(self.frame_charts, 2):
-            chart.set_values([(index, row[column]) for index, row in enumerate(points)])
+            self.live_frames.enable_game(filename)
 
     def add_hardware_telemetry(self, layout):
         layout.addWidget(label("CPU package", "section"))
@@ -832,7 +1053,6 @@ class Window(QMainWindow):
             {2: clock, 3: percent, 4: celsius, 5: celsius}, widths=[132, 130, 124, 110, 110])
         table.setMinimumHeight(204)
         layout.addWidget(table)
-        self.add_frame_section(layout, hardware=True)
         layout.addWidget(label("CPU time by process", "section"))
         table, self.cpu_time_model = make_table(
             ["PID", "Process", "CPU time · last 60 s", "Cumulative CPU time"],
@@ -883,7 +1103,6 @@ class Window(QMainWindow):
                                                for i, value in enumerate(snapshot.get("cores", []))])
         self.cpu_time_model.set_rows(sorted(snapshot.get("process_times", []),
                                             key=lambda row: (row[2] is not None, row[2] or 0), reverse=True)[:20])
-        self.show_frame_capture()
 
     def show_io_summary(self):
         if self.io_context is None and self.disk_overview is None:
@@ -1816,5 +2035,6 @@ def run(state, autostart, launcher):
     try:
         return application.exec()
     finally:
+        window.live_frames.close()
         if WINDOWS:
             set_taskbar_window_properties(hwnd, ((pid, None) for pid, _ in properties))

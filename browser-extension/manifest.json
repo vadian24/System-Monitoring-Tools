@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "System Monitor Video FPS",
+  "version": "1.0.0",
+  "description": "Show live Twitch and YouTube playback FPS and dropped frames in System Monitor.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "pair.html"},
+  "content_scripts": [{
+    "matches": ["https://www.twitch.tv/*", "https://www.youtube.com/*"],
+    "js": ["video.js"]
+  }]
+}
