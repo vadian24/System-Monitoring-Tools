@@ -1090,6 +1090,7 @@ class Window(QMainWindow):
         self.gpu_cards[2][0].setStyleSheet(f"color:{COLORS[2]}; font-size:21px")
         self.gpu_cards[2][1].setToolTip("Solid line: VRAM used. Dashed line: total VRAM.")
         layout.addLayout(cards)
+        self.add_live_frames(layout)
         layout.addWidget(label("Network activity", "section"))
         cards, self.overview_network_cards = network_cards()
         layout.addLayout(cards)
@@ -1123,28 +1124,27 @@ class Window(QMainWindow):
             ("Core clocks", "CPU package power", "Load average & run queue", "CPU time · last 60 s"),
             (COLORS[0], COLORS[3], COLORS[1], COLORS[2])))
         layout.addLayout(cards)
-        self.add_live_frames(layout)
 
     def add_live_frames(self, layout):
-        self.frames_panel = QWidget()
-        body = QVBoxLayout(self.frames_panel)
-        body.setContentsMargins(0, 0, 0, 0)
         cards, self.live_frame_cards = compact_cards((("Live FPS", COLORS[0]), ("Dropped frames", COLORS[3])))
-        body.addLayout(cards)
-        self.frames_panel.hide()
-        layout.addWidget(self.frames_panel)
+        layout.addLayout(cards)
+        self.show_live_frames()
 
     def show_live_frames(self):
         if self.pause.isChecked():
             return
         sample = self.live_frames.reading()
-        self.frames_panel.setVisible(sample is not None)
-        if sample:
-            source, fps, drops = sample
+        if sample is None:
             apply_fields(self.live_frame_cards, [
-                (number(fps, " FPS", 0), source),
-                ("Unavailable" if drops is None else f"{drops:,}", f"{source} · last 60 s"),
+                ("—", "No frame source reporting"),
+                ("—", "Last 60 seconds"),
             ])
+            return
+        source, fps, drops = sample
+        apply_fields(self.live_frame_cards, [
+            (number(fps, " FPS", 0), source),
+            ("Unavailable" if drops is None else f"{drops:,}", f"{source} · last 60 s"),
+        ])
 
     def prepare_live_frames(self):
         try:

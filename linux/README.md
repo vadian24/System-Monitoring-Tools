@@ -47,7 +47,7 @@ I/O pressure charts show Full (solid) and Some (dashed). Hardware shows per-driv
 
 ### Live FPS and dropped frames
 
-Overview shows two compact cards when a supported source is reporting: **Live FPS** and **Dropped frames** over the last 60 seconds. The cards remain visible when the source keeps reporting after a window switch. MangoHud supplies FPS and does not report dropped frames to the monitor.
+Under **Overview → GPU Activity**, **Live FPS** and **Dropped frames** stay visible. A dash means no reading is available. Drops cover the last 60 seconds. MangoHud supplies FPS and does not report dropped frames to the monitor.
 
 - **Games:** Install MangoHud if needed. Choose **Live FPS setup → Copy MangoHud launch option**, paste it into that game's Steam Launch Options, then restart the game. Outside Steam, use the same launcher path followed by the game command in place of `%command%`. The monitor reads the MangoHud log from that game session.
 - **Twitch and YouTube:** Open **Overview → Live FPS setup → Browser video**. The guide shows the bundled add-on ZIP in the monitor's `add-ons` folder and walks through extraction, loading, and pairing in a Chromium browser. The add-on can report while its video tab or browser window is in the background. The pairing code works across app restarts until you select **Disable video FPS**. See the [browser add-on guide](../browser-extension/README.md) for more details.
