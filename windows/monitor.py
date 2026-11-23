@@ -86,6 +86,9 @@ def initialize(db):
             PRIMARY KEY(ts, device)
         );
         CREATE INDEX IF NOT EXISTS drive_activity_device_time ON drive_activity_history(device, ts);
+        CREATE TABLE IF NOT EXISTS cpu_temperature_history (
+            ts INTEGER PRIMARY KEY, celsius REAL
+        );
         CREATE TABLE IF NOT EXISTS gpu_history (
             ts INTEGER NOT NULL, slot INTEGER NOT NULL, name TEXT NOT NULL,
             utilization REAL, temperature REAL, vram_used REAL, vram_total REAL, power REAL,
@@ -451,6 +454,13 @@ def nvidia_thermal(executable):
     return results
 
 
+def windows_cpu_temperature_worker(sampler):
+    while not STOP.is_set():
+        readings, _ = windows_platform.powershell_json(windows_platform.CPU_TEMPERATURE_SCRIPT, timeout=8)
+        sampler.windows_cpu_temperature = windows_platform.cpu_temperature_reading(readings)
+        STOP.wait(5 if sampler.windows_cpu_temperature else 25)
+
+
 def windows_disk_worker(sampler):
     while not STOP.is_set():
         rows, _ = windows_platform.powershell_json(windows_platform.DISK_ACTIVITY_SCRIPT, timeout=8)
@@ -484,6 +494,20 @@ def windows_gpu_worker(sampler):
         STOP.wait(4)
 
 
+def cpu_temperature(sensors):
+    readings = [(driver, name, value, high, critical) for driver, name, value, high, critical in sensors
+                if driver in {"coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal", "cpu_therm", "via-cputemp"}
+                and value is not None]
+    packages = [row for row in readings if "package" in row[1].lower() or row[1].lower() == "tdie"]
+    controls = [row for row in readings if row[1].lower() == "tctl"]
+    if not readings:
+        return None
+    driver, name, value, high, critical = max(packages or controls or readings, key=lambda row: row[2])
+    high = high if high and high > 0 else None
+    critical = critical if critical and critical > 0 else None
+    return [value, high, critical, f"{driver} · {name}"]
+
+
 class Sampler:
     def __init__(self):
         self.last = time.monotonic()
@@ -501,10 +525,12 @@ class Sampler:
         self.next_inventory = self.next_services = 0
         self.windows_inventory = ([("System", "Hardware inventory", "Waiting for Windows hardware information")], [], {})
         self.windows_video_controllers = []
+        self.windows_cpu_temperature = None
         self.windows_disk_busy = {}
         self.windows_gpu = [], {}, "Checking display adapters"
         if WINDOWS:
             threading.Thread(target=windows_inventory_worker, args=(self,), name="inventory", daemon=True).start()
+            threading.Thread(target=windows_cpu_temperature_worker, args=(self,), name="cpu-temperature", daemon=True).start()
             threading.Thread(target=windows_disk_worker, args=(self,), name="disk-activity", daemon=True).start()
             threading.Thread(target=windows_gpu_worker, args=(self,), name="graphics", daemon=True).start()
         psutil.cpu_percent()
@@ -615,7 +641,7 @@ class Sampler:
         else:
             gpus, gpu_status = gpu()
             gpu_thermal = {}
-        return dict(ts=time.time(), cpu=cpu, cores=cores, memory=memory.percent, ram_used=memory.total-memory.available,
+        return dict(ts=time.time(), cpu_temperature=self.windows_cpu_temperature if WINDOWS else cpu_temperature(temperatures), cpu=cpu, cores=cores, memory=memory.percent, ram_used=memory.total-memory.available,
                     ram_total=memory.total, swap=swap.percent, pressure=psi, disk=drives, net=interfaces, gpu=gpus,
                     gpu_status=gpu_status, gpu_thermal=gpu_thermal, drm=displays if WINDOWS else drm_metrics(), processes=processes,
                     inventory=hardware if WINDOWS else self.inventory,
@@ -915,6 +941,9 @@ def run_samples(db, token=None):
                 for event in events:
                     record(db, now, *event)
                 if tick >= next_sample:
+                    cpu_thermal = snapshot.get("cpu_temperature")
+                    db.execute("INSERT OR REPLACE INTO cpu_temperature_history VALUES(?,?)",
+                               (int(now), cpu_thermal[0] if cpu_thermal else None))
                     db.executemany("INSERT OR REPLACE INTO drive_activity_history VALUES(?,?,?,?)",
                                    [(int(now), key, *data[:2]) for key, data in snapshot["drive_activity"].items()])
                     db.execute("INSERT OR REPLACE INTO samples(ts,cpu,memory,io_full,disk_write,network,disk_read) VALUES(?,?,?,?,?,?,?)",
@@ -934,6 +963,7 @@ def run_samples(db, token=None):
                     drop_total = link_total = 0
                     next_sample = tick + 15
                 if tick >= next_cleanup:
+                    db.execute("DELETE FROM cpu_temperature_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM drive_activity_history WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM samples WHERE ts < ?", (now-7*86400,))
                     db.execute("DELETE FROM gpu_history WHERE ts < ?", (now-7*86400,))

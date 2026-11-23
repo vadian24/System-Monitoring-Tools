@@ -62,6 +62,23 @@ foreach ($entry in @(
 ConvertTo-Json -InputObject $rows -Depth 3 -Compress
 """
 
+CPU_TEMPERATURE_SCRIPT = r"""
+foreach ($provider in @('LibreHardwareMonitor', 'OpenHardwareMonitor')) {
+    try {
+        $namespace = 'root/' + $provider
+        $cpus = @(Get-CimInstance -Namespace $namespace -ClassName Hardware -OperationTimeoutSec 3 |
+            Where-Object { $_.HardwareType -eq 'CPU' } |
+            ForEach-Object { $_.Identifier })
+        if (-not $cpus.Count) { continue }
+        $rows = @(Get-CimInstance -Namespace $namespace -ClassName Sensor -OperationTimeoutSec 3 |
+            Where-Object { $_.SensorType -eq 'Temperature' -and $cpus -contains $_.Parent -and $null -ne $_.Value } |
+            ForEach-Object { @{ Name = $_.Name; Value = $_.Value; Provider = $provider } })
+        if ($rows.Count) { break }
+    } catch {}
+}
+ConvertTo-Json -InputObject @($rows | Where-Object { $_ }) -Compress
+"""
+
 DISK_ACTIVITY_SCRIPT = r"""
 $rows = @(Get-CimInstance -ClassName Win32_PerfFormattedData_PerfDisk_PhysicalDisk -OperationTimeoutSec 4 |
     ForEach-Object {
@@ -313,6 +330,18 @@ def powershell_json(script, *, variables=None, timeout=20):
         return json.loads(result.stdout), ""
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         return None, str(error)[:200]
+
+
+def cpu_temperature_reading(rows):
+    if not isinstance(rows, list):
+        return None
+    valid = [row for row in rows if isinstance(row, dict) and isinstance(row.get("Value"), (int, float))
+             and 0 < row["Value"] <= 150]
+    primary = [row for row in valid if re.search(r"package|\btdie\b|\btctl\b", row.get("Name") or "", re.I)]
+    if not valid:
+        return None
+    best = max(primary or valid, key=lambda row: row["Value"])
+    return [best["Value"], None, None, f'{best["Provider"]} · {best["Name"]}']
 
 
 def nvidia_tool():

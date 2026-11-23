@@ -72,10 +72,13 @@ old pin opens Python, unpin that shortcut and pin the running dashboard again.
 
 What the dashboard shows
 ------------------------
-- Overview: live CPU, RAM, per-drive activity, and GPU activity for
+- Overview: live CPU utilization and temperature, RAM, per-drive activity,
+  and GPU activity for
   detected display adapters, including virtual adapters. Utilization and
   dedicated memory depend on the driver. NVIDIA temperature and power are
   available when nvidia-smi exposes them. Network charts appear below GPU activity.
+  CPU temperature requires CPU readings from an active Libre Hardware Monitor
+  or Open Hardware Monitor WMI provider. Temperature history starts in 1.3.5.
 - Processes: CPU, memory, and total process write I/O where permitted. On
   Windows this process counter can include non-disk I/O.
 - Services: Windows Service Control Manager entries and running, stopped,

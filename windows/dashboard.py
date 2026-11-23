@@ -461,6 +461,7 @@ GRAPH_STATUS = {
     0: ("Normal", "#1b2e28", "#437964"),
     1: ("Elevated", "#3b311c", "#ffd45b"),
     2: ("High", "#451e2a", "#ff7888"),
+    "unrated": ("No thermal limits", "#191f2b", "#2c3546"),
     None: ("Unavailable", "#232a36", "#434d60"),
 }
 
@@ -608,7 +609,8 @@ class Window(QMainWindow):
         system_metrics = ("CPU utilization", "RAM in use")
         if not WINDOWS:
             system_metrics += ("Full I/O pressure",)
-        cards, self.cards = metric_cards(zip(system_metrics, COLORS, (100, 100, 100)))
+        system_metrics += ("CPU temperature",)
+        cards, self.cards = metric_cards(zip(system_metrics, COLORS, (100,) * (len(system_metrics) - 1) + (None,)))
         layout.addLayout(cards)
         self.add_drive_health(layout)
         gpu_header = QHBoxLayout()
@@ -1263,10 +1265,11 @@ class Window(QMainWindow):
         self.show_drive_health()
         self.refresh_drive_activity()
         s = self.snapshot
+        self.show_cpu_temperature()
         if s:
             readings = ((s.get("cpu"), 80, 95), (s.get("memory"), 85, 95),
                         (s.get("pressure", {}).get("io.full"), 5, 50))
-            for key, (metric, chart), (value, warning, critical) in zip(("cpu", "memory", "io"), self.cards, readings):
+            for key, (metric, chart), (value, warning, critical) in zip(("cpu", "memory", "io"), self.cards[:-1], readings):
                 metric.setText(percent(value))
                 level = self.graph_level(key, threshold_level(value, warning, critical))
                 color_graph(chart.parentWidget(), level, f"Yellow at {warning}%. Red at {critical}%.")
@@ -1289,6 +1292,25 @@ class Window(QMainWindow):
         except sqlite3.Error:
             self.recent.set_rows([])
 
+    def show_cpu_temperature(self):
+        value, high, critical, source = self.snapshot.get("cpu_temperature") or (None, None, None, "")
+        metric, chart = self.cards[-1]
+        metric.setText(celsius(value))
+        if value is None:
+            self.graph_level("cpu-temp", None)
+            rule = ("CPU sensor unavailable. Windows can read CPU temperatures from an active Libre Hardware Monitor or Open Hardware Monitor WMI provider."
+                    if WINDOWS else "CPU sensor unavailable.")
+            level = None
+        elif high is None and critical is None:
+            level = "unrated" if self.graph_level("cpu-temp", 0) is not None else None
+            rule = f"{source}. The sensor did not report thermal limits."
+        else:
+            level = self.graph_level("cpu-temp", threshold_level(value, high, critical))
+            limits = [f"{name} at {celsius(limit)}" for name, limit in (("Yellow", high), ("Red", critical)) if limit is not None]
+            rule = " · ".join([source, *limits])
+        color_graph(chart.parentWidget(), level, rule)
+        chart.setToolTip(rule)
+
     def refresh_history(self):
         self.history_tick = time.monotonic()
         cutoff = int(time.time() - self.range.currentData())
@@ -1298,8 +1320,15 @@ class Window(QMainWindow):
                 rows = db.execute(f"SELECT {columns} FROM samples WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
         except sqlite3.Error:
             rows = []
-        for column, (_, chart) in enumerate(self.cards, 1):
+        for column, (_, chart) in enumerate(self.cards[:-1], 1):
             chart.set_values([(row[0], row[column]) for row in rows])
+        try:
+            with database(True) as db:
+                temperatures = db.execute(
+                    "SELECT ts,celsius FROM cpu_temperature_history WHERE ts>=? ORDER BY ts", (cutoff,)).fetchall()
+        except sqlite3.Error:
+            temperatures = []
+        self.cards[-1][1].set_values([tuple(row) for row in temperatures])
         self.refresh_drive_activity_history(cutoff)
         self.refresh_gpu_history(cutoff)
         self.refresh_network_charts(self.overview_network_cards, self.network_health_caption, cutoff)
