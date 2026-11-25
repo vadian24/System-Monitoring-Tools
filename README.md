@@ -13,7 +13,7 @@ The dashboard contacts GitHub to check for and download updates. Network Traffic
 | Platform | Latest download | Source and documentation |
 | --- | --- | --- |
 | Windows 10/11, x64 | [Windows 1.3.11 installer](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/windows/1.3.11/SystemMonitorSetup.exe) | [Windows source](windows/) · [Windows guide](windows/README.txt) |
-| Linux desktop | [Linux 1.3.11 ZIP](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/linux/1.3.11/Linux-System-Monitor.zip) | [Linux source](linux/) · [Linux guide](linux/README.md) |
+| Linux desktop | [Linux 1.3.12 ZIP](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/linux/1.3.12/Linux-System-Monitor.zip) | [Linux source](linux/) · [Linux guide](linux/README.md) |
 
 These links download the files directly. If the GitHub file view shows **Error Loading Page**, use a direct download link. Browse the [download archive](downloads/) for earlier versions.
 
@@ -41,9 +41,9 @@ The installer is unsigned and may show a Windows SmartScreen warning. The earlie
 
 The [Linux guide](linux/README.md) lists dependencies and explains the user service.
 
-## Live FPS
+## FPS and logs
 
-Live FPS and Dropped frames stay visible under **Overview → GPU Activity**. Open **Overview → Live FPS Setup** for step-by-step instructions and the local ZIP for the [browser add-on](browser-extension/README.md). The platform guides cover PresentMon on Windows and MangoHud on Linux.
+Windows shows **Live FPS** and **Dropped frames** under **Overview → GPU Activity**. On Linux, **Logs** opens a plain-text export of retained monitor events and telemetry.
 
 ## Dashboard updates
 

@@ -1,6 +1,6 @@
 # System Monitor Video FPS
 
-This optional Chromium add-on sends live playback FPS and a rolling dropped-frame count from a playing Twitch or YouTube video to System Monitor 1.3.8 or later.
+This optional Chromium add-on sends live playback FPS and a rolling dropped-frame count from a playing Twitch or YouTube video to Windows System Monitor 1.3.8 or later, or Linux System Monitor 1.3.8–1.3.11.
 
 1. In System Monitor, choose **Overview → Live FPS Setup → Browser video → Open add-on folder**. Extract `System-Monitor-Video-FPS.zip` to a folder you can keep. You can also [download it directly](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/System-Monitor-Video-FPS.zip).
 2. In Chrome, Edge, Brave, or Vivaldi, open the browser's extensions page, turn on **Developer mode**, and select **Load unpacked**. Choose the folder containing `manifest.json`.

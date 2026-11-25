@@ -6,7 +6,7 @@ Use these direct download links for the latest builds.
 | --- | --- |
 | Windows 10/11 (x64) | [Windows 1.3.11 installer (.exe)](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/windows/1.3.11/SystemMonitorSetup.exe) |
 | Windows 10/11 (x64) with Python already installed | [Windows 1.3.11 manual package (.zip)](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/windows/1.3.11/System-Monitor-Windows.zip) |
-| Linux desktop | [Linux 1.3.11 (.zip)](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/linux/1.3.11/Linux-System-Monitor.zip) |
+| Linux desktop | [Linux 1.3.12 (.zip)](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/linux/1.3.12/Linux-System-Monitor.zip) |
 
 If the GitHub file view shows **Error Loading Page**, use the corresponding link above.
 
@@ -47,6 +47,7 @@ The `1.0.0` folder contains the original published packages. The `network-update
 
 | Version folder | Download |
 | --- | --- |
+| [1.3.12](linux/1.3.12/) | [ZIP](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/linux/1.3.12/Linux-System-Monitor.zip) |
 | [1.3.11](linux/1.3.11/) | [ZIP](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/linux/1.3.11/Linux-System-Monitor.zip) |
 | [1.3.10](linux/1.3.10/) | [ZIP](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/linux/1.3.10/Linux-System-Monitor.zip) |
 | [1.3.9](linux/1.3.9/) | [ZIP](https://raw.githubusercontent.com/vadian24/System-Monitoring-Tools/main/downloads/linux/1.3.9/Linux-System-Monitor.zip) |

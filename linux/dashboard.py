@@ -1,18 +1,13 @@
 """Qt dashboard for the local system monitor."""
 import csv
 from collections import defaultdict
+from contextlib import closing
 from datetime import datetime, timedelta
 from functools import lru_cache
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from itertools import chain
 import json
-import os
-import re
-import secrets
 from pathlib import Path
 import sqlite3
-import shlex
-import shutil
-import stat
 import tempfile
 import subprocess
 import sys
@@ -21,7 +16,7 @@ import time
 
 from PySide6.QtCore import QAbstractTableModel, QLocale, QModelIndex, QRectF, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPushButton, QPlainTextEdit, QScrollArea, QSizePolicy,
                                QTabWidget, QTableView, QVBoxLayout, QWidget)
@@ -543,421 +538,126 @@ def clock(value):
     return number(value / 1000 if value is not None else None, " GHz", 2)
 
 
-MANGOHUD_LAUNCHER = """#!/bin/sh
-set -eu
-umask 077
-root=STATE
-mkdir -p -- "$root"
-session=$(mktemp -d "$root/game-XXXXXXXX")
-trap 'rm -rf -- "$session"' EXIT
-trap 'if [ "${pid:-}" ]; then kill -TERM "$pid" 2>/dev/null || :; fi; exit 143' TERM HUP
-trap 'if [ "${pid:-}" ]; then kill -INT "$pid" 2>/dev/null || :; fi; exit 130' INT
-export MANGOHUD_CONFIG="${MANGOHUD_CONFIG:+$MANGOHUD_CONFIG,}autostart_log=1,log_interval=500,log_duration=0,output_folder=$session"
-mangohud "$@" &
-pid=$!
-wait "$pid"
-"""
+# The monitor's retained history, in the order it is most useful for troubleshooting.
+LOG_HISTORY = (
+    ("events", "Events and warnings", "last DESC, id DESC", (
+        ("last", "Last seen"), ("first", "First seen"), ("severity", "Severity"),
+        ("category", "Category"), ("source", "Source"), ("repeats", "Occurrences"),
+        ("message", "Message"), ("id", "Event ID"),
+    )),
+    ("samples", "System activity", "ts DESC", (
+        ("ts", "Time"), ("cpu", "CPU (%)"), ("memory", "RAM (%)"),
+        ("io_full", "Full I/O pressure (%)"), ("disk_write", "Disk write (B/s)"), ("network", "Network (B/s)"),
+    )),
+    ("io_pressure_history", "I/O pressure", "ts DESC", (
+        ("ts", "Time"), ("some", "Some I/O pressure (%)"),
+    )),
+    ("drive_activity_history", "Drive activity", "ts DESC, device", (
+        ("ts", "Time"), ("device", "Drive"), ("read_rate", "Read (B/s)"), ("write_rate", "Write (B/s)"),
+    )),
+    ("cpu_temperature_history", "CPU temperature", "ts DESC", (
+        ("ts", "Time"), ("celsius", "Temperature (°C)"),
+    )),
+    ("gpu_history", "GPU activity", "ts DESC, slot", (
+        ("ts", "Time"), ("slot", "Slot"), ("name", "GPU"), ("utilization", "Utilization (%)"),
+        ("temperature", "Temperature (°C)"), ("vram_used", "VRAM used (MiB)"),
+        ("vram_total", "VRAM total (MiB)"), ("power", "Power (W)"),
+    )),
+    ("traffic_history", "Network traffic", "ts DESC", (
+        ("ts", "Time"), ("received", "Receive (B/s)"), ("sent", "Send (B/s)"),
+    )),
+    ("network_health_history", "Network health", "ts DESC", (
+        ("ts", "Time"), ("timeouts", "Timeouts"), ("drops", "Drops"), ("carrier_losses", "Carrier losses"),
+    )),
+    ("network_probe_history", "Network probes", "ts DESC, kind", (
+        ("ts", "Time"), ("kind", "Probe"), ("target", "Target"), ("latency", "Latency (ms)"),
+        ("loss", "Loss (%)"), ("status", "Status"),
+    )),
+    ("network_peers", "Observed network peers", "last DESC, protocol, host, port", (
+        ("last", "Last seen"), ("first", "First seen"), ("protocol", "Protocol"), ("host", "Host"),
+        ("port", "Port"), ("process", "Process"), ("country", "Country"), ("pids", "Process IDs"),
+        ("states", "States"), ("sent", "Sent (B)"), ("received", "Received (B)"), ("flagged", "Flagged at"),
+    )),
+)
 
 
-def mango_fps(path):
-    with path.open("rb") as stream:
-        tail = stream.read(16384)
-        if not any(line.startswith(b"fps,frametime,") for line in tail.splitlines()):
-            return None
-        size = stream.seek(0, 2)
-        offset = max(0, size - 4096)
-        stream.seek(offset)
-        tail = stream.read(4096)
-    if offset:
-        tail = tail.partition(b"\n")[2]
-    lines = tail.decode("utf-8", "replace").splitlines()
-    for line in reversed(lines):
+def log_field(column, value):
+    if value is None:
+        return "—"
+    if column in {"ts", "first", "last", "flagged"}:
+        return datetime.fromtimestamp(value).astimezone().isoformat(sep=" ", timespec="seconds")
+    if column == "severity":
+        return LEVELS.get(value, str(value))
+    return str(value).replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+
+
+def export_logs(state):
+    exports = state / "exports"
+    exports.mkdir(mode=0o700, parents=True, exist_ok=True)
+    now = datetime.now().astimezone()
+    path = exports / f"system-monitor-logs-{now:%Y%m%d-%H%M%S-%f}.txt"
+
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=exports, delete=False) as output:
+        pending = Path(output.name)
         try:
-            fps = float(line.split(",", 1)[0])
-            if 0 < fps <= 1000:
-                return fps
-        except ValueError:
-            continue
-    return None
+            output.write(f"Linux System Monitor logs\nExported {now:%Y-%m-%d %H:%M:%S %Z}\n"
+                         "History is shown newest first in each section.\n"
+                         "This local report may contain IP addresses, process names, device details, and file paths.\n")
+            if (state / "history.sqlite3").is_file():
+                with closing(database(True)) as db:
+                    db.execute("BEGIN")
+                    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    for table, title, order, columns in LOG_HISTORY:
+                        output.write(f"\n=== {title} ===\n")
+                        if table not in tables:
+                            output.write("No retained history for this section.\n")
+                            continue
+                        fields, headers = zip(*columns)
+                        rows = db.execute(f"SELECT {', '.join(fields)} FROM {table} ORDER BY {order}")
+                        first = rows.fetchone()
+                        if first is None:
+                            output.write("No retained entries.\n")
+                            continue
+                        output.write(" | ".join(headers) + "\n")
+                        for row in chain((first,), rows):
+                            output.write(" | ".join(log_field(field, value) for field, value in zip(fields, row)) + "\n")
+            else:
+                output.write("\nNo history database has been created yet.\n")
 
+            output.write("\n=== Collector startup log ===\n")
+            startup = state / "collector-startup.log"
+            if startup.is_file() and startup.stat().st_size:
+                with startup.open(encoding="utf-8", errors="replace") as source:
+                    for line in source:
+                        output.write(line)
+            else:
+                output.write("No collector startup messages recorded.\n")
 
-class MangoHudFrames:
-    def __init__(self, state):
-        self.root = (state / "frame-games").resolve()
-        self.selected = None
-
-    def reading(self):
-        candidates = []
-        for directory in self.root.glob("game-*"):
-            if not directory.is_dir() or directory.is_symlink():
-                continue
-            for path in directory.glob("*.csv"):
-                try:
-                    info = path.lstat()
-                except OSError:
-                    continue
-                if (path.name.endswith("_summary.csv") or not stat.S_ISREG(info.st_mode)
-                        or time.time() - info.st_mtime > 3):
-                    continue
-                candidates.append((path == self.selected, info.st_mtime, path))
-        for _, _, path in sorted(candidates, reverse=True):
-            try:
-                fps = mango_fps(path)
-            except OSError:
-                continue
-            if fps is not None:
-                self.selected = path
-                name = re.sub(r"_\d{4}-\d{2}-\d{2}.*$", "", path.stem)
-                return name[:90], fps, None
-        self.selected = None
-        return None
-
-    def close(self):
-        self.selected = None
-
-
-def configure_mango(state):
-    if not shutil.which("mangohud"):
-        raise OSError("Install MangoHud before setting up game FPS.")
-    root = (state / "frame-games").resolve()
-    if any(char in str(root) for char in ",\r\n"):
-        raise OSError("The monitor data path contains characters unsupported by MangoHud.")
-    source = MANGOHUD_LAUNCHER.replace("root=STATE", f"root={shlex.quote(str(root))}")
-    launcher = state / "mangohud-live.sh"
-    launcher.write_text(source, encoding="utf-8")
-    launcher.chmod(0o700)
-    return f"{shlex.quote(str(launcher))} %command%"
-
-
-VIDEO_PORT = 43178
-VIDEO_SOURCES = {"Twitch", "YouTube"}
-
-
-def video_sample(payload):
-    source, fps, drops = payload.get("source"), payload.get("fps"), payload.get("drops")
-    if (not isinstance(source, str) or source not in VIDEO_SOURCES or type(fps) not in (int, float)
-            or not 0 <= fps <= 1000 or type(drops) is not int or not 0 <= drops <= 60000):
-        return None
-    return source, fps, drops
-
-
-class VideoReceiver:
-    def __init__(self, key):
-        self.latest = None
-
-        class Handler(BaseHTTPRequestHandler):
-            def setup(self):
-                self.request.settimeout(2)
-                super().setup()
-
-            def log_message(self, *_):
-                pass
-
-            def do_POST(self):
-                authorization = self.headers.get("Authorization", "").encode("utf-8")
-                if (self.path != "/video" or self.headers.get("Host") != f"127.0.0.1:{VIDEO_PORT}"
-                        or not secrets.compare_digest(authorization, f"Bearer {key}".encode("ascii"))):
-                    self.send_error(403)
-                    return
-                try:
-                    size = int(self.headers.get("Content-Length", "0"))
-                    if not 1 <= size <= 512 or self.headers.get_content_type() != "application/json":
-                        raise ValueError("Invalid sample")
-                    payload = json.loads(self.rfile.read(size))
-                    sample = video_sample(payload) if isinstance(payload, dict) else None
-                except (ValueError, OSError):
-                    sample = None
-                if sample is None:
-                    self.send_error(400)
-                    return
-                receiver.latest = (time.monotonic(), sample)
-                self.send_response(204)
-                self.end_headers()
-
-        receiver = self
-        self.server = HTTPServer(("127.0.0.1", VIDEO_PORT), Handler)
-        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
-
-    def reading(self):
-        sample = self.latest
-        return sample[1] if sample and time.monotonic() - sample[0] <= 2.75 else None
-
-    def close(self):
-        self.server.shutdown()
-        self.server.server_close()
-
-
-class LiveFrameSources:
-    def __init__(self, state):
-        self.state = state
-        config = updater.read_json(state / "live-frames.json")
-        self.config = config if isinstance(config, dict) else {}
-        self.video = None
-        self.game = None
-        self.video_error = ""
-        self.game_error = ""
-
-    def save(self):
-        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.state, delete=False) as stream:
-            pending = Path(stream.name)
-            try:
-                json.dump(self.config, stream)
-            except (OSError, ValueError, TypeError):
-                stream.close()
-                pending.unlink(missing_ok=True)
-                raise
-        try:
-            pending.replace(self.state / "live-frames.json")
+            output.write("\n=== Latest telemetry snapshot ===\n")
+            snapshot = updater.read_json(state / "live.json")
+            if isinstance(snapshot, dict):
+                stamp = snapshot.pop("ts", None)
+                if stamp is not None:
+                    output.write(f"Sample time: {log_field('ts', stamp)}\n")
+                json.dump(snapshot, output, ensure_ascii=False, indent=2)
+                output.write("\n")
+            else:
+                output.write("No telemetry snapshot available.\n")
+            output.close()
+            pending.replace(path)
         finally:
             pending.unlink(missing_ok=True)
-
-    def start(self):
-        key = self.config.get("video_key")
-        if isinstance(key, str) and re.fullmatch(r"[a-f0-9]{32}", key) and self.video is None:
-            try:
-                self.video = VideoReceiver(key)
-                self.video_error = ""
-            except OSError as error:
-                self.video_error = f"Video receiver unavailable: {error}"
-        self.start_game()
-
-    def reading(self):
-        video = self.video.reading() if self.video else None
-        if video and self.config.get("frame_priority") != "game":
-            return video
-        game = self.game.reading() if self.game else None
-        return game or video
-
-    def pair_video(self):
-        key = self.config.get("video_key")
-        if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):
-            self.config["video_key"] = secrets.token_hex(16)
-            self.save()
-        self.start()
-        if self.video is None:
-            raise OSError(self.video_error)
-        return self.config["video_key"]
-
-    def stop_video(self):
-        self.config.pop("video_key", None)
-        self.save()
-        if self.video:
-            self.video.close()
-            self.video = None
-        self.video_error = ""
-
-    def game_status(self):
-        return self.game_error or ("MangoHud tracking enabled." if self.game else "Game FPS is disabled.")
-
-    def start_game(self):
-        if self.config.get("game") and self.game is None:
-            try:
-                self.game = MangoHudFrames(self.state)
-                self.game_error = ""
-            except (OSError, ImportError, RuntimeError) as error:
-                self.game_error = str(error)
-
-    def enable_game(self):
-        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
-        option = configure_mango(self.state)
-        self.config["game"] = True
-        self.save()
-        self.start_game()
-        if self.game is None:
-            raise OSError(self.game_error)
-        return option
-
-    def stop_game(self):
-        self.config.pop("game", None)
-        self.save()
-        if self.game:
-            self.game.close()
-            self.game = None
-        self.game_error = ""
-
-
-    def close(self):
-        if self.video:
-            self.video.close()
-        if self.game:
-            self.game.close()
-
-
-
-class LiveFPSSetup(QDialog):
-    def __init__(self, parent, sources, game_details, choose_game):
-        super().__init__(parent)
-        self.setWindowTitle("Live FPS Setup")
-        self.setObjectName("base")
-        self.resize(760, 555)
-        self.setMinimumSize(515, 380)
-        self.sources = sources
-        self.choose_game = choose_game
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 14, 18, 14)
-        intro = label("Choose a source for live FPS and dropped frames.", "section")
-        intro.setWordWrap(True)
-        outer.addWidget(intro)
-        tabs = QTabWidget()
-        outer.addWidget(tabs, 1)
-        video, video_layout = self.page([
-            ("Find the add-on ZIP", "Click <b>Open add-on folder</b>. Extract "
-             "<b>System-Monitor-Video-FPS.zip</b> to a folder you can keep."),
-            ("Load the extracted folder", "Open the Extensions page in Vivaldi, Chrome, Edge, or Brave. "
-             "For example, use <b>vivaldi://extensions</b> in Vivaldi or <b>chrome://extensions</b> in Chrome. "
-             "Turn on <b>Developer mode</b>, click <b>Load unpacked</b>, and choose the folder containing "
-             "<b>manifest.json</b>. Keep that extracted folder after loading it."),
-            ("Pair it with System Monitor", "Click <b>Copy video pairing code</b> below. Open the "
-             "<b>System Monitor Video FPS</b> add-on from the browser's Extensions menu, paste the code, "
-             "then click <b>Pair</b>. Reload any Twitch or YouTube tab that was already open."),
-            ("Watch a video", "Play a Twitch stream or YouTube video. The Overview cards keep updating "
-             "when you switch windows while the browser continues reporting frames. "
-             "If an older copy of the add-on is loaded, extract the new ZIP into the loaded folder, click "
-             "<b>Reload</b> on its browser extension card, then reload the video tab."),
-        ])
-        tabs.addTab(video, "Browser video")
-        self.zip_path = QLineEdit()
-        self.zip_path.setReadOnly(True)
-        self.zip_path.setText(str(sources.state / "add-ons" / updater.BROWSER_ADDON_NAME))
-        self.zip_path.setAccessibleName("Local browser add-on ZIP path")
-        video_layout.addWidget(self.zip_path)
-        open_folder = QPushButton("Open add-on folder")
-        open_folder.setToolTip("Open the folder containing the browser add-on ZIP bundled with this update.")
-        open_folder.clicked.connect(self.open_addon)
-        pair = QPushButton("Copy video pairing code")
-        pair.setToolTip("Enable browser video readings and copy the code to paste into the add-on.")
-        pair.clicked.connect(self.pair_video)
-        self.disable_video = QPushButton("Disable video FPS")
-        self.disable_video.clicked.connect(self.stop_video)
-        self.video_status = self.actions(video_layout, (open_folder, pair, self.disable_video))
-
-        game, game_layout = self.page(game_details["steps"])
-        tabs.addTab(game, game_details["tab"])
-        game_button = QPushButton(game_details["button"])
-        game_button.setToolTip(game_details["tooltip"])
-        game_button.clicked.connect(self.setup_game)
-        self.disable_game = QPushButton("Disable game FPS")
-        self.disable_game.clicked.connect(self.stop_game)
-        buttons = [game_button, self.disable_game]
-        if game_details.get("download"):
-            download = QPushButton("Open PresentMon downloads")
-            download.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(game_details["download"])))
-            buttons.insert(0, download)
-        self.game_status = self.actions(game_layout, buttons)
-        preference = QHBoxLayout()
-        preference.addWidget(label("When both sources are reporting"))
-        priority = QComboBox()
-        priority.addItem("Prefer browser video", "video")
-        priority.addItem("Prefer game", "game")
-        priority.setCurrentIndex(1 if self.sources.config.get("frame_priority") == "game" else 0)
-        priority.currentIndexChanged.connect(lambda: self.set_priority(priority.currentData()))
-        preference.addWidget(priority)
-        preference.addStretch()
-        outer.addLayout(preference)
-        close = QPushButton("Done")
-        close.clicked.connect(self.accept)
-        footer = QHBoxLayout()
-        footer.addStretch()
-        footer.addWidget(close)
-        outer.addLayout(footer)
-        self.refresh_status()
-        close.setFocus()
-
-    def page(self, steps):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 8, 0, 0)
-        scroll = QScrollArea(widgetResizable=True)
-        body = QWidget(objectName="scrollBody")
-        instructions = QVBoxLayout(body)
-        instructions.setContentsMargins(12, 8, 14, 8)
-        instructions.setSpacing(5)
-        for number, (title, description) in enumerate(steps, 1):
-            instructions.addWidget(label(f"{number}. {title}", "metricTitle"))
-            detail = QLabel(description)
-            detail.setTextFormat(Qt.TextFormat.RichText)
-            detail.setWordWrap(True)
-            detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            instructions.addWidget(detail)
-            instructions.addSpacing(7)
-        instructions.addStretch()
-        scroll.setWidget(body)
-        layout.addWidget(scroll, 1)
-        return page, layout
-
-    def actions(self, layout, buttons):
-        row = QHBoxLayout()
-        for button in buttons:
-            row.addWidget(button)
-        row.addStretch()
-        layout.addLayout(row)
-        status = label("", "muted")
-        status.setWordWrap(True)
-        layout.addWidget(status)
-        return status
-
-    def refresh_status(self, video_message="", game_message=""):
-        sources = self.sources
-        self.disable_video.setEnabled(bool(sources.config.get("video_key")))
-        self.disable_game.setEnabled(bool(sources.config.get("game")))
-        self.video_status.setText(video_message or sources.video_error or
-                                  ("Pairing enabled. Load the add-on and paste your code."
-                                   if sources.config.get("video_key") else "Browser video FPS is disabled."))
-        self.game_status.setText(game_message or sources.game_status())
-
-    def set_priority(self, value):
-        self.sources.config["frame_priority"] = value
-        try:
-            self.sources.save()
-        except OSError as error:
-            self.refresh_status(video_message=str(error), game_message=str(error))
-
-    def open_addon(self):
-        try:
-            path = updater.install_browser_addon(self.sources.state)
-            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent))):
-                raise OSError("Could not open the add-on folder. Use the ZIP path shown above.")
-            self.refresh_status(video_message="Extract the ZIP, then load the folder containing manifest.json.")
-        except OSError as error:
-            self.refresh_status(video_message=str(error))
-
-    def pair_video(self):
-        try:
-            QApplication.clipboard().setText(self.sources.pair_video())
-            self.refresh_status(video_message="Code copied. Paste it into the browser add-on and click Pair.")
-        except OSError as error:
-            self.refresh_status(video_message=str(error))
-
-    def setup_game(self):
-        try:
-            message = self.choose_game()
-            self.refresh_status(game_message=message or "")
-        except OSError as error:
-            self.refresh_status(game_message=str(error))
-
-    def stop_video(self):
-        try:
-            self.sources.stop_video()
-            self.refresh_status(video_message="Browser video FPS disabled. The old pairing code has expired.")
-        except OSError as error:
-            self.refresh_status(video_message=str(error))
-
-    def stop_game(self):
-        try:
-            self.sources.stop_game()
-            self.refresh_status()
-        except OSError as error:
-            self.refresh_status(game_message=str(error))
+    return path
 
 
 class Window(QMainWindow):
+    logs_ready = Signal(object, str)
+
     def __init__(self, state, autostart, launcher):
         super().__init__()
         self.state = state
         self.launcher = launcher
         self.snapshot = {}
-        self.live_frames = LiveFrameSources(state)
         self.graph_streaks = {}
         self.drive_activity_cards = {}
         self.settings = {}
@@ -1018,17 +718,15 @@ class Window(QMainWindow):
         self.status = label("Waiting for collector telemetry…", "muted")
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         footer.addWidget(self.status, 1)
-        folder = QPushButton("Log folder")
-        folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.state))))
-        footer.addWidget(folder)
+        self.logs_button = QPushButton("Logs")
+        self.logs_button.setToolTip("Export retained events and telemetry to a text file and open it.")
+        self.logs_button.clicked.connect(self.open_logs)
+        self.logs_ready.connect(self.finish_logs_export)
+        footer.addWidget(self.logs_button)
         outer.addLayout(footer)
         self.timer = QTimer(self, interval=2000)
         self.timer.timeout.connect(self.refresh)
         self.timer.start()
-        self.fps_timer = QTimer(self, interval=750)
-        self.fps_timer.timeout.connect(self.show_live_frames)
-        self.fps_timer.start()
-        QTimer.singleShot(0, self.prepare_live_frames)
         self.refresh()
 
     def add_page(self, name, scrollable=False):
@@ -1057,9 +755,6 @@ class Window(QMainWindow):
             self.range.addItem(name, seconds)
         self.range.currentIndexChanged.connect(self.refresh_history)
         toolbar.addWidget(self.range)
-        frames_setup = QPushButton("Live FPS setup")
-        frames_setup.clicked.connect(self.configure_live_frames)
-        toolbar.addWidget(frames_setup)
         layout.addLayout(toolbar)
         system_metrics = (
             ("CPU utilization", COLORS[0], 100),
@@ -1090,7 +785,6 @@ class Window(QMainWindow):
         self.gpu_cards[2][0].setStyleSheet(f"color:{COLORS[2]}; font-size:21px")
         self.gpu_cards[2][1].setToolTip("Solid line: VRAM used. Dashed line: total VRAM.")
         layout.addLayout(cards)
-        self.add_live_frames(layout)
         layout.addWidget(label("Network activity", "section"))
         cards, self.overview_network_cards = network_cards()
         layout.addLayout(cards)
@@ -1124,59 +818,6 @@ class Window(QMainWindow):
             ("Core clocks", "CPU package power", "Load average & run queue", "CPU time · last 60 s"),
             (COLORS[0], COLORS[3], COLORS[1], COLORS[2])))
         layout.addLayout(cards)
-
-    def add_live_frames(self, layout):
-        cards, self.live_frame_cards = compact_cards((("Live FPS", COLORS[0]), ("Dropped frames", COLORS[3])))
-        layout.addLayout(cards)
-        self.show_live_frames()
-
-    def show_live_frames(self):
-        if self.pause.isChecked():
-            return
-        sample = self.live_frames.reading()
-        if sample is None:
-            apply_fields(self.live_frame_cards, [
-                ("—", "No frame source reporting"),
-                ("—", "Last 60 seconds"),
-            ])
-            return
-        source, fps, drops = sample
-        apply_fields(self.live_frame_cards, [
-            (number(fps, " FPS", 0), source),
-            ("Unavailable" if drops is None else f"{drops:,}", f"{source} · last 60 s"),
-        ])
-
-    def prepare_live_frames(self):
-        try:
-            updater.install_browser_addon(self.state)
-        except OSError:
-            # The setup guide retries and displays the file error when opened.
-            pass
-        self.live_frames.start()
-
-    def configure_live_frames(self):
-        guide = {
-            "tab": "Linux games · MangoHud",
-            "button": "Copy MangoHud launch option",
-            "tooltip": "Copy the launch option to paste into the game's Steam properties.",
-            "steps": [
-                ("Check MangoHud", "Open Konsole and run <b>mangohud --version</b>. "
-                 "If it is missing on Nobara or Fedora, run <b>sudo dnf install mangohud</b>."),
-                ("Set the game's launch option", "Click <b>Copy MangoHud launch option</b> below. "
-                 "In Steam, right-click the game in <b>Library</b>, choose <b>Properties → General</b>, "
-                 "and paste the copied text into <b>Launch Options</b>. For a non-Steam game, use the "
-                 "copied launcher path followed by the game command in place of <b>%command%</b>."),
-                ("Restart the game", "Launch the game after saving the option. Overview displays "
-                 "live FPS while the game produces readings, including after you switch windows. "
-                 "MangoHud supplies FPS for this integration. Dropped frames are marked <b>Unavailable</b>."),
-            ],
-        }
-        LiveFPSSetup(self, self.live_frames, guide, self.configure_game_frames).exec()
-        self.show_live_frames()
-
-    def configure_game_frames(self):
-        QApplication.clipboard().setText(self.live_frames.enable_game())
-        return "Launch option copied. Paste it into Steam and restart the game."
 
     def add_hardware_telemetry(self, layout):
         layout.addWidget(label("CPU package", "section"))
@@ -2115,6 +1756,29 @@ class Window(QMainWindow):
         self.detail.setPlainText(f"{LEVELS.get(severity, 'Unknown')}  •  {category}  •  {source}\n"
                                  f"First {local_time(first)}  /  Last {local_time(last)}  /  {count:,} occurrence(s)\n\n{message}")
 
+    def open_logs(self):
+        self.logs_button.setEnabled(False)
+        self.logs_button.setText("Exporting logs…")
+
+        def export():
+            try:
+                path = export_logs(self.state)
+            except (OSError, sqlite3.Error, ValueError) as error:
+                self.logs_ready.emit(None, str(error))
+            else:
+                self.logs_ready.emit(path, "")
+
+        threading.Thread(target=export, daemon=True).start()
+
+    @Slot(object, str)
+    def finish_logs_export(self, path, error):
+        self.logs_button.setText("Logs")
+        self.logs_button.setEnabled(True)
+        if error:
+            QMessageBox.warning(self, "Export logs", f"Could not export the logs.\n{error}")
+        elif not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            QMessageBox.information(self, "Logs exported", f"The text report was saved to:\n{path}")
+
     def export_events(self):
         name, _ = QFileDialog.getSaveFileName(self, "Export matching events", "linux-events.csv", "CSV files (*.csv)")
         if not name:
@@ -2146,7 +1810,4 @@ def run(state, autostart, launcher):
     application.setStyleSheet(THEME)
     window = Window(state, autostart, launcher)
     window.show()
-    try:
-        return application.exec()
-    finally:
-        window.live_frames.close()
+    return application.exec()

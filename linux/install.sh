@@ -37,14 +37,6 @@ from pathlib import Path
 import sys
 
 application, destination, interpreter = map(Path, sys.argv[1:])
-sys.path.insert(0, str(application))
-from monitor import STATE
-from updater import install_browser_addon
-
-try:
-    install_browser_addon(STATE)
-except OSError as error:
-    print(f"Could not save the browser add-on: {error}", file=sys.stderr)
 
 def quote(argument):
     value = str(argument)

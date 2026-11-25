@@ -39,19 +39,11 @@ Open **Linux System Monitor** from your application launcher. The installer uses
 
 The CPU temperature card prefers a package or die sensor. Its colors use thermal limits reported by that sensor, when available. Temperature history starts with version 1.3.5.
 
-## CPU, I/O, and frame telemetry
+## CPU and I/O telemetry
 
 Overview adds clock speeds, CPU package power, Vcore, load averages, runnable task count, and the process with the most CPU time over the last 60 seconds. Hardware shows per-core readings and recent plus lifetime CPU time by process. Clock speeds come from CPU frequency reporting. Power comes from readable package energy counters, and temperature headroom requires a reported thermal limit. Vcore requires an explicitly labeled core-voltage sensor.
 
 I/O pressure charts show Full (solid) and Some (dashed). Hardware shows per-drive read and write throughput, completed operations per second, average latency, busy time, average outstanding I/O, and completed TRIM discard requests per second.
-
-### Live FPS and dropped frames
-
-Under **Overview → GPU Activity**, **Live FPS** and **Dropped frames** stay visible. A dash means no reading is available. Drops cover the last 60 seconds. MangoHud supplies FPS and does not report dropped frames to the monitor.
-
-- **Games:** Install MangoHud if needed. Choose **Live FPS setup → Copy MangoHud launch option**, paste it into that game's Steam Launch Options, then restart the game. Outside Steam, use the same launcher path followed by the game command in place of `%command%`. The monitor reads the MangoHud log from that game session.
-- **Twitch and YouTube:** Open **Overview → Live FPS setup → Browser video**. The guide shows the bundled add-on ZIP in the monitor's `add-ons` folder and walks through extraction, loading, and pairing in a Chromium browser. The add-on can report while its video tab or browser window is in the background. The pairing code works across app restarts until you select **Disable video FPS**. See the [browser add-on guide](../browser-extension/README.md) for more details.
-
 
 ## Drive health
 
@@ -74,7 +66,7 @@ The dashboard checks GitHub when it opens. Use **Check for updates** in the head
 - Both tabs graph Latency and Probe Loss separately for the router and internet target. About every 15 seconds the collector sends three ICMP echo requests to each address with `ping`. Router readings use the IPv4 default gateway. The internet address defaults to `1.1.1.1`, follows normal system routing, and can be changed or cleared in Network Traffic. Latency is the mean round-trip time of replies. Probe Loss is the percentage of requests without a reply. Missing routes or probe errors show a gap. A target can filter ICMP even while other traffic works.
 - **Live peers** shows remote sockets in the latest sample. **Recent peers** shows peers observed in the last seven days, with process, protocol, country estimate, and first/last seen times. Sort the byte columns to focus on larger sampled TCP transfers. A dash means no byte counter was available. Search by IP, port, process, country, or protocol.
 - **Watchlist only** highlights country matches. The initial list is `KR, KP` (South Korea and North Korea). The list is editable and blank clears it. Matches are logged as informational Network events at most once per peer per day. **New in last 24h** finds peers first seen recently by this monitor. IP geolocation describes the visible peer address, and VPNs, CDNs, hosting, and stale country data can affect it.
-- Country lookup uses `mmdblookup` and a local GeoLite2 Country database. If those are missing on Nobara, the relevant packages are `libmaxminddb` and `geolite2-country`. The tab shows the file date. To use a newer database, place `GeoLite2-Country.mmdb` in the folder opened by **Log folder**. No remote lookups are made.
+- Country lookup uses `mmdblookup` and a local GeoLite2 Country database. If those are missing on Nobara, the relevant packages are `libmaxminddb` and `geolite2-country`. The tab shows the file date. To use a newer database, place `GeoLite2-Country.mmdb` in the monitor data folder (normally `~/.local/state/nobara-system-monitor`). No remote lookups are made.
 - TCP totals are deltas between observed socket samples. A socket's earlier traffic, sockets that open and close between samples, unconnected UDP traffic, and processes outside the account's visibility can be missed. The per-peer view shows both inbound and outbound peers when visible. The interface totals include traffic that the socket view cannot attribute. This is socket monitoring and contains no packet payload capture.
 
 ## History and coverage
@@ -83,7 +75,7 @@ The collector imports up to seven days of readable journal history the first tim
 
 The collector records sustained I/O stalls, CPU utilization and memory pressure, sustained temperatures above the thresholds provided by accessible sensors, and filesystems at or above 95% usage. Very short spikes can fall between samples. Some applications write only to private logs or their own files. Journal visibility depends on your account. The Overview shows whether the kernel journal and GPU telemetry are accessible. The app does not change account permissions. SMART faults reported by `smartd` appear in Events if the service and journal are accessible. The collector does not run privileged SMART commands.
 
-Telemetry remains local. The **Log folder** button opens the state folder, normally `~/.local/state/nobara-system-monitor`. History can contain remote IPs, process names, private paths and device information. Peer history retains up to seven days and 25,000 peer records.
+Telemetry remains local. The **Logs** button exports all retained monitor events and telemetry history, the collector startup log, and the latest snapshot to a plain-text file and opens it in your default text viewer. Exports are saved in `exports/` under the monitor data folder (normally `~/.local/state/nobara-system-monitor`). Reports can contain remote IPs, process names, private paths, and device information. Peer history retains up to seven days and 25,000 peer records.
 
 To manage the installed background service:
 

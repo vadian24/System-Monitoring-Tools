@@ -1,6 +1,5 @@
 """User-level GitHub updates for System Monitor."""
 import argparse
-from base64 import b64decode
 from contextlib import contextmanager
 import hashlib
 from io import BytesIO
@@ -26,94 +25,6 @@ PACKAGES = {"windows": ("System-Monitor-Windows", ("windows_platform.py", "syste
 COMMON_FILES = ("monitor.py", "dashboard.py", "network.py", "updater.py", "version.json")
 SERVICE = "nobara-system-monitor.service"
 MAX_PACKAGE = 12 * 1024 * 1024
-
-
-BROWSER_ADDON_NAME = "System-Monitor-Video-FPS.zip"
-# Embedded archive lets the previous updater deliver the add-on with its existing file set.
-BROWSER_ADDON_ZIP = (
-    b"UEsDBBQAAAAIAFpHd119ewmg6gIAAOIFAAAiAAAAU3lzdGVtLU1vbml0b3ItVmlkZW8tRlBTL1JFQURNRS5tZIVUXW4cRR"
-    b"B+n1OUxENgNNsbO5FAPMZJJAujWPGCBAhpa7vLnsY9Xa2umllvDsABOCInQd0zu8YmwOOMqrq+v6ov4OYgSgN8z9ErZ/jR"
-    b"O2J4f33TNJveC3BSzxEDXPSZBz8OgM6tOIJQdALBTwQp4GGH9r60AUYHCJlD8PEOXOaUyK1uMw4ElseocJt5AKxdpWSz92"
-    b"p74Aw/8bgZdwRTxaD8HNuZeWW+KYUBlbJpmjMDl/FZVQe2ZxaCtv0wUZ487eHP3/+Aq4K0ALwhHVP99SbzXigv88qfD4ni"
-    b"keAtB0e5bQ28e9CMVmE7T1otk1ZVq9X76xvzyadtAYxLFxx4BIsR7omSKcTqFwZh+MXxPgZGB17B+UxWw+HXL3vVJN+u1x"
-    b"n35s5rP+5GoWw5KkU1lof1hM5jPH+9fgrDx7vVhjnIekAf18fXZf1faL8yzXkVr9pKHbxzd9TBm4wTdVBzMGFwvgMukmhP"
-    b"sJvVeiFAD0pRPEeBhKVNxxyBI7TtW5oocKIMAztq267mQSiQVWjbq0J7jAntPbki7cXsVXl/Ua4wRh9LMrYDRn9LouY34b"
-    b"g1zavP+l0R/pvbcnL7gtNhsTqhL7KBrRjNbHvBcGIGidOYOkgoOsMrtc/YXKMv+WheG/hI1dFS+M88K+7mRsWsp215jIXM"
-    b"HXsfHe8F9r0P9HfJqyY+jiSQKXHWgv20dHW1xDTNhmFMDpUA40lksJwOXSFWI1xejbSHny+vwUflhbWX+uYj/dmM7pHrTL"
-    b"Bti81PlbKYXVf+Rcj/o4KB74hSmVRKpJyExfWUSShPJE8BLUYVcj2dLg8OKSyVJX8v5GjrUZJ6ZyjLYlc5VHWgV4KAOwod"
-    b"DIQyZnIlJLOtnztVi0CBLQZwKP2OMTtAhe3Z+dfmpXlpzrYGLnWZErkigh8+XkkH6jWQdLONhU7vRTkf6oKhnUc4UvRBDL"
-    b"z1grtwvH4lu/551gseG44Lk8mSnyhX9PSQfKZFk8d0m+YvUEsDBBQAAAAIADJHd13oGbBtUwMAANEGAAAmAAAAU3lzdGVt"
-    b"LU1vbml0b3ItVmlkZW8tRlBTL2JhY2tncm91bmQuanOdVF2P2zYQfPev2AhFIKE6yncJkFaGYqQFCjToJUHvXgrDBShxZb"
-    b"GWSIFcWVV9/u8FqQ9fcn3qo8jZ4ezsjgqtLIGVhBYyOAcVUWvTJOn7nlEvqagYnYIUgkf/EcTwFWTQHXU5skI3DvSH7h67"
-    b"HIPLZlV44rbmg1QHyEBhD/e8DaPNqkYCizUWhGL8ag2epO7sZrUqKqMbZMRzy7T6HRt9QsG4EL9JS6jQhMRzyN7P1ExgjY"
-    b"TuNIqu9aZTJBtkWt2jtfyAX1FwO6gCQsubtsYYLCqBJnKs5xXAKN3qzhQI2WjObsQwbeRBqv1mgXk1E4NTvWVSuFtZQvhq"
-    b"4nh6glefuiZHw6T9VREexjaiCAxSZ9RmtfAp3UMGLZpSm4arApnSvXMNoNQGwhG1kyIGg1xIddiDLmc3It/A+LpjuplBzL"
-    b"kB7+Hter2OvvVOCs9/mWSPtmyZVLwgecKZ9D8c92WAtUVfuTT5i1SScGEqWxvB69fwwoQZIIxubfTtQxbJvRLDeZmUNzQG"
-    b"103qvLo8lzBWz5a6hlYASQJfDJZooNRFZ1F4+pwXxxg0VWh6aRGOiC1QhctiwkkK1NBXskaQBAZbbciyZVAzWwY7xtgkec"
-    b"9KqUQY7q7T8Ws1T2Hsg0210XWNTtLKvMb/xTbVerZFfjYL3LLdeg/bLYSzrRW34YyLYHutSWcZS81ccsTBhhFT+DeFETvx"
-    b"usNn4ic9bm8n/AHp+sQShxn39HQtybIl/dGz0c1nkM1QnxEywzTl8eXzEYcLZMB7Lgmm7FvSxiW+1gWvvZTgiEPgdUxKkj"
-    b"93/KZc3/y4P7+5u3yXMEJL4REHpy0IoudSYGIvkYoq9L+/NElu796xNVuz2/Ttm9t3PyR+XYJ4UgfQIFVapBB8+fzwGMTT"
-    b"qUEhDRaUQoDGaLNcWHlQvE7hQ64NPfgPH1ndUXjnMjsDK+QCjU3hHHzoqNJG/sNJauV+vz8hN2gggO/hiEMMwc9aESq6eR"
-    b"xadADetrUsPD75y2oVXGbaXIshhY8Pnz8xS0aqgyyH8DzGLb0u3BS/srXpi51ubQw+xy+u/Okl8k/NgS04FdXkVpLAw2AJ"
-    b"G7jXSpI20PABcoSi1i5i2kxpJKyxQbcEE0BIy/MaBfNpd9z/AlBLAwQUAAAACAAyR3ddsTGKZiUBAADnAQAAJgAAAFN5c3"
-    b"RlbS1Nb25pdG9yLVZpZGVvLUZQUy9tYW5pZmVzdC5qc29uXZHBasMwEETv/opljyHIcXso+AN6KxQSCqUEo8ibWImtFdLa"
-    b"JoT8e5HtEtKr5u3uzOiWAWCnnT1SlGqgEC07LOF1nQSnO8IScHuNQh18sLPCAb5sTQzvn1ucqMcUFqpQm/m1pmiC9bIo24"
-    b"ZHaO1AsButmAa0q+Gb+11/IPCtvh60uaSdk1AH9p5qOAbdUQTr4NmCmm94Cp2N6XjEEn4wCgd9ItxPasNRqv9II+LLPC9e"
-    b"3tRGbVSRrxY63T8F7l2NJdwwUhisoWrkcKGQEjwAdY54n4a0WfLdsKaj7lupPPveJ95rG1QjXbuwhp2Qk2quZXJzywCm/s"
-    b"U09PAXyzwfx1HJ1JSSIV/hGp6kK/fSH0gZ7v4SAOB53jGk/0km9xnAfZ/ds19QSwMEFAAAAAgAAUR3XTJ1tobyAQAAmQMA"
-    b"ACIAAABTeXN0ZW0tTW9uaXRvci1WaWRlby1GUFMvcGFpci5odG1sfVNNb9swDL33V3AadqvjuBiywpF9GbDTBhQotrts0T"
-    b"FXW9IkOh8L9t8HSWmyXnaSyPfIJz7a8p22PZ8cwsjz1N7JeMCkzK4RaERMoNLtHYCckRX0o/IBuRELD8WjuAFGzdiIPeHB"
-    b"Wc8CemsYDTfiQJrHRuOeeixScA9kiElNRejVhE2V2zDxhO3zKTDO8M0aYuvhB2m08OXpWZYZj8zAp3wD6Kw+wRkGa7iG6q"
-    b"M7QkgNioXuISgTioCehi0k5RoeNmt33MKs/I5MDdUmRr2drC9CP+KMNUy0Gxm08i9b+JNExuoiUQT6jTVUn2JVxsi4heEM"
-    b"nT1GlMyuhs56jb7o7PGqW63XH26yG3eENVQPsY1TWqeqza1ptzBbA+dLQeHjk2p4vDHeB1a8hEghU4yYCdWqwjlTZHlxSZ"
-    b"Z5gzJalewbq/+4PFaJ49rP1p2ARwSnyJPZQW81wuDtHBfgrdm1X2mPsQoC8uKiYkoDGXgrsJKlS20H6+e8ODmpDicYrG/E"
-    b"C55E+/SPjCwTemFmi0lnIsSvtRFOhXCwXgtQC9vezm5CxkbYYRDg8ddCHvWlwcXOXBiWbibOerLMUPuWkgORJBcT5xft93"
-    b"ReC5LDr9NIl6h5JQK8nfAata+jh96TYwi+j48nv/qZwJyOa8r7kWX+Ef8CUEsDBBQAAAAIAAFEd13ZzNfmTgEAAOwCAAAg"
-    b"AAAAU3lzdGVtLU1vbml0b3ItVmlkZW8tRlBTL3BhaXIuanOtkj9PwzAQxfd8isNlcCTqonZCUVigGwMSYkIgGefSWEnsYl"
-    b"8CUZXvjuxUhaGthMTkP3p393vPVtZ4Ak+SOg85FFZ1LRoSHx264QkbVGQdZ7NJwdIsUbGi1NgU5wpqHII6UZWzLQpP1skN"
-    b"isYq2YgNEmdRIahCw/muxmFMIb+FXQKgS+A1DumeSxB+0Z01hIYgB/YotdNmA8oWCF72WAiWJWOaJadoSutalgpZFOseDT"
-    b"1oT2jQcea791YTuwLpB6MA+zhioogHsXVxvcdSdg3xNEsApghqHCCfghC9bDoU5HQ7KYKDi8Xbi5yX1/Ob191qOV4uBKGn"
-    b"aCyNA+CEv7UhdEAVwmo5V5V0UoWL7S/bwXBo4JA6Z8J+TADkp9QERxP3SPuQg/gXdBgYm/1X1rPOBNKjcatGq/qQNj88+B"
-    b"lwh63tcf9b/sb+HEF+iL8BUEsDBBQAAAAIADJHd10UC2KtZQIAAKcFAAAhAAAAU3lzdGVtLU1vbml0b3ItVmlkZW8tRlBT"
-    b"L3ZpZGVvLmpznVRLj9MwEL73V0x7qBxITbjsoUtWQkgrOKzEQ4LDag9uMmksHDv4Uaia/nfkR9IHi4TwyfP+5puxCcmgvI"
-    b"PDDECghR2vUUEJ0glxm3S9xh1XzlypW26s0nso4fHJ6yoljQWNvdIWSjCs6wX63FWrVYdUO2l5h9SgrB/QGLZFEp0yWjFb"
-    b"tSRBOWa3sxmAQftBWtQ7JsgJ5FinF2yP2henlNaqch1KS3841PsvKLCySr8VgixCQ4vsKYQC0IYLi5pwi51POfcX2jNnsI"
-    b"blMsko6ygGaYv2neAo7WesrCEZFSi3toXlMiUFsPseVTO5f/VFPwq237Dq+yfHBLd7KMsSFo2TleVKLrIRkFHaEsJy2IQe"
-    b"N7QKtb7x2rbwYpLfI9+2FlbArhzYhUP2WIRhAPAGyDyylCXmojIwkqVBkQOXrLJ8h2uw2qHnPrpeb4I/z2yCP9eb4I9G67"
-    b"SM0vFsbgerLBOBoHvNOjRrCJocaq36HusLU9IdoUwD/xu7JOGORfye+RDUjdIdkxVSqX6SDF7B66IoTgSlLZqXZep3GGA+"
-    b"dTkMERu8mTqnUTEMI7Rz26gahtNieCSrs3Av38FNcZrJSHTE8gzVh0uC8pD0+D/k+ww+4wh09Qf2cxab4PvAbEs79osUeW"
-    b"Jjdc3GKib29JLnGk6zSUhp70xLDt4QezLHSwcoJ9f0WnvFpfWvI1xGElOpmyKF/yNl4+Inrpre5OkawKyn4hprVyEhxnV5"
-    b"rBxeqHEdvExIQkQORZZPwzR8I3AN8+lPanldoxwdGlX5v2YNJzsz915J4pcQyTjmYVOz29kx87v9G1BLAQIUAxQAAAAIAF"
-    b"pHd119ewmg6gIAAOIFAAAiAAAAAAAAAAAAAACkgQAAAABTeXN0ZW0tTW9uaXRvci1WaWRlby1GUFMvUkVBRE1FLm1kUEsB"
-    b"AhQDFAAAAAgAMkd3XegZsG1TAwAA0QYAACYAAAAAAAAAAAAAAKSBKgMAAFN5c3RlbS1Nb25pdG9yLVZpZGVvLUZQUy9iYW"
-    b"NrZ3JvdW5kLmpzUEsBAhQDFAAAAAgAMkd3XbEximYlAQAA5wEAACYAAAAAAAAAAAAAAKSBwQYAAFN5c3RlbS1Nb25pdG9y"
-    b"LVZpZGVvLUZQUy9tYW5pZmVzdC5qc29uUEsBAhQDFAAAAAgAAUR3XTJ1tobyAQAAmQMAACIAAAAAAAAAAAAAAKSBKggAAF"
-    b"N5c3RlbS1Nb25pdG9yLVZpZGVvLUZQUy9wYWlyLmh0bWxQSwECFAMUAAAACAABRHdd2czX5k4BAADsAgAAIAAAAAAAAAAA"
-    b"AAAApIFcCgAAU3lzdGVtLU1vbml0b3ItVmlkZW8tRlBTL3BhaXIuanNQSwECFAMUAAAACAAyR3ddFAtirWUCAACnBQAAIQ"
-    b"AAAAAAAAAAAAAApIHoCwAAU3lzdGVtLU1vbml0b3ItVmlkZW8tRlBTL3ZpZGVvLmpzUEsFBgAAAAAGAAYA5QEAAIwOAAAA"
-    b"AA=="
-)
-
-
-def install_browser_addon(state):
-    directory = state / "add-ons"
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    destination = directory / BROWSER_ADDON_NAME
-    data = b64decode(BROWSER_ADDON_ZIP)
-    try:
-        if destination.is_file() and destination.stat().st_size == len(data) and destination.read_bytes() == data:
-            return destination
-    except FileNotFoundError:
-        pass
-    with tempfile.NamedTemporaryFile(dir=directory, delete=False) as output:
-        pending = Path(output.name)
-        try:
-            output.write(data)
-            output.close()
-            pending.replace(destination)
-        finally:
-            pending.unlink(missing_ok=True)
-    return destination
 
 
 def read_json(path):
